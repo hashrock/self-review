@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/hashrock/self-review/internal/agent"
 	"github.com/hashrock/self-review/internal/app"
 	"github.com/hashrock/self-review/internal/config"
 	"github.com/hashrock/self-review/internal/guide"
@@ -32,7 +33,7 @@ Commands:
   commits   list the commits under review and whether each has a guide
   check     check guides: format, and paths and lines against the repository
   open      open the review window
-  config    show or change settings (the reader's language)
+  config    show or change settings (the reader's language, the agent)
   version   print the version
   help      show help (self-review help <command> for a command)
 
@@ -479,21 +480,7 @@ func runOpen(args []string) error {
 		return err
 	}
 	if wait {
-		return app.Main(rest, func(args []string, wd string) (*app.Request, error) {
-			// A later launch forwards os.Args[1:]: "open" and its options,
-			// or nothing when the app is opened from Finder.
-			if len(args) > 0 && args[0] == "open" {
-				return openWorkspace(stripWait(args[1:]), wd)
-			}
-			if len(args) == 0 || strings.HasPrefix(args[0], "-psn_") {
-				dir, err := app.ChooseRepository()
-				if err != nil {
-					return nil, err
-				}
-				return openWorkspace([]string{"--repo", dir}, "")
-			}
-			return openWorkspace(stripWait(args), wd)
-		})
+		return app.Main(append([]string{"open"}, rest...), opener)
 	}
 	exe, err := os.Executable()
 	if err != nil {
@@ -524,19 +511,30 @@ func launchedFromFinder(args []string) bool {
 	return err == nil && strings.Contains(exe, ".app/Contents/MacOS/")
 }
 
-// runFinder asks for a repository and opens its review window. A later
-// launch, from Finder or a terminal, goes to the same process.
-func runFinder() error {
-	return app.Main(nil, func(args []string, wd string) (*app.Request, error) {
-		if len(args) > 0 && args[0] == "open" {
-			return openWorkspace(stripWait(args[1:]), wd)
-		}
-		dir, err := app.ChooseRepository()
+// runFinder opens the welcome window, where a repository is chosen or
+// dropped. A later launch, from Finder or a terminal, goes to the same process.
+func runFinder() error { return app.Main(nil, opener) }
+
+// opener turns a command line into what the window shows. A later launch
+// forwards os.Args[1:]: "open" and its options, or nothing (or a -psn_
+// argument) when the app is opened from Finder, which shows the welcome
+// window.
+func opener(args []string, wd string) (*app.Request, error) {
+	if len(args) > 0 && args[0] == "open" {
+		return openWorkspace(stripWait(args[1:]), wd) // the current directory by default
+	}
+	if len(args) == 0 || strings.HasPrefix(args[0], "-psn_") {
+		cfg, err := config.Load()
 		if err != nil {
 			return nil, err
 		}
-		return openWorkspace([]string{"--repo", dir}, "")
-	})
+		spec, err := agentSpec(cfg)
+		if err != nil {
+			return nil, err
+		}
+		return &app.Request{Lang: cfg.ResolvedLang(), Agent: spec}, nil
+	}
+	return openWorkspace(args, wd)
 }
 
 func stripWait(args []string) []string {
@@ -597,13 +595,36 @@ func openWorkspace(args []string, wd string) (*app.Request, error) {
 	if err != nil {
 		return nil, err
 	}
-	req := &app.Request{Workspace: ws, View: *view, Lang: cfg.ResolvedLang()}
+	spec, err := agentSpec(cfg)
+	if err != nil {
+		return nil, err
+	}
+	req := &app.Request{Workspace: ws, View: *view, Lang: cfg.ResolvedLang(), Agent: spec}
 	if *file != "" {
 		if req.File, req.Start, req.End, err = parseFileArg(*file); err != nil {
 			return nil, err
 		}
 	}
 	return req, nil
+}
+
+// agentSpec is how to start the agent the settings name.
+func agentSpec(cfg config.Config) (agent.Spec, error) {
+	if len(cfg.AgentCommand) > 0 {
+		return agent.Spec{Title: "Agent", Command: cfg.AgentCommand}, nil
+	}
+	spec, ok := agent.Agents[cfg.AgentName()]
+	if !ok {
+		return agent.Spec{}, fmt.Errorf("unknown agent %q: want %s, or set agentCommand in %s", cfg.AgentName(), strings.Join(agent.Names, ", "), configPathHint())
+	}
+	return spec, nil
+}
+
+func configPathHint() string {
+	if p, err := config.Path(); err == nil {
+		return p
+	}
+	return "the config file"
 }
 
 // parseFileArg reads path[:start[-end]].
@@ -627,17 +648,24 @@ func parseFileArg(s string) (path string, start, end int, err error) {
 
 // ---------- config ----------
 
-const configHelp = `Usage: self-review config [lang [<value>]]
+const configHelp = `Usage: self-review config [lang [<value>] | agent [<value>]]
 
 Shows or changes settings, kept in <user config dir>/self-review/config.json.
 
-  self-review config            show every setting
-  self-review config lang       print the reader's language, resolved (e.g. ja)
-  self-review config lang <v>   set it: auto (follow the system), en or ja
+  self-review config             show every setting
+  self-review config lang        print the reader's language, resolved (e.g. ja)
+  self-review config lang <v>    set it: auto (follow the system), en or ja
+  self-review config agent       print the agent questions go to
+  self-review config agent <v>   set it: claude, gemini or codex
 
 The reader's language is what the review window shows its texts in, and
-what agents write guides in. Agent-facing text (help, check output, the
-skill) stays English.
+what agents write guides and answers in. Agent-facing text (help, check
+output, the skill) stays English.
+
+The agent answers questions asked in the review window, through the Agent
+Client Protocol, using the agent's own login. It runs read-only and ends
+with the window. To run another ACP agent, set "agentCommand" in the config
+file to its command line, as a JSON array.
 `
 
 func runConfig(args []string) error {
@@ -645,28 +673,50 @@ func runConfig(args []string) error {
 	if err != nil {
 		return err
 	}
-	switch {
-	case len(args) == 0:
+	show := func() {
 		fmt.Printf("lang = %s (%s)\n", cfg.Lang, cfg.ResolvedLang())
-		return nil
-	case args[0] == "-h" || args[0] == "--help":
+		if len(cfg.AgentCommand) > 0 {
+			fmt.Printf("agentCommand = %s\n", strings.Join(cfg.AgentCommand, " "))
+		} else {
+			fmt.Printf("agent = %s\n", cfg.AgentName())
+		}
+	}
+	if len(args) > 0 && (args[0] == "-h" || args[0] == "--help") {
 		fmt.Print(configHelp)
 		return nil
-	case args[0] != "lang" || len(args) > 2:
+	}
+	if len(args) == 0 {
+		show()
+		return nil
+	}
+	if len(args) > 2 || (args[0] != "lang" && args[0] != "agent") {
 		fmt.Fprint(os.Stderr, configHelp)
 		return exitError(2)
-	case len(args) == 1:
-		fmt.Println(cfg.ResolvedLang())
+	}
+	if len(args) == 1 {
+		if args[0] == "lang" {
+			fmt.Println(cfg.ResolvedLang())
+		} else {
+			fmt.Println(cfg.AgentName())
+		}
 		return nil
 	}
 	v := strings.ToLower(args[1])
-	if !config.ValidLang(v) {
-		return fmt.Errorf("unsupported language %q: want auto, %s", args[1], strings.Join(config.Languages, ", "))
+	switch args[0] {
+	case "lang":
+		if !config.ValidLang(v) {
+			return fmt.Errorf("unsupported language %q: want auto, %s", args[1], strings.Join(config.Languages, ", "))
+		}
+		cfg.Lang = v
+	case "agent":
+		if _, ok := agent.Agents[v]; !ok {
+			return fmt.Errorf("unknown agent %q: want %s", args[1], strings.Join(agent.Names, ", "))
+		}
+		cfg.Agent = v
 	}
-	cfg.Lang = v
 	if err := config.Save(cfg); err != nil {
 		return err
 	}
-	fmt.Printf("lang = %s (%s)\n", cfg.Lang, cfg.ResolvedLang())
+	show()
 	return nil
 }

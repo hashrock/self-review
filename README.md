@@ -9,6 +9,7 @@
 A plain diff shows a change file by file. A good explanation shows it in the order that makes sense: the intent first, then the entry point, then the pieces it calls, with only the lines that matter. self-review asks your coding agent (Claude Code, for example) to write that explanation as a short guide, and shows it in a native window next to the real diffs from your Git repository.
 
 - **Local only.** No server, no port, no telemetry. The window is drawn natively from Go with [MyGo](https://mygo.run/); there is no web page or browser involved. Diffs come from your local Git.
+- **Ask your agent.** Ask about the whole change, a section of the guide, or any lines (the **+** next to a line number), and read the answers next to the diff. Questions go to the coding agent you already use (Claude Code, Gemini CLI or Codex), read-only.
 - **Nothing to clean up.** Closing the window ends the process.
 - **Whole branch or one commit at a time.** Review a pull request as a whole, or step through its commits.
 - **Viewed marks.** Tick files as you read them; editing a file makes it unread again.
@@ -25,7 +26,7 @@ The app is also the command-line tool. Put it on your `PATH`:
 sudo ln -s /Applications/self-review.app/Contents/MacOS/self-review /usr/local/bin/self-review
 ```
 
-Opening the app from Finder asks for a repository folder and opens its review.
+Opening the app from Finder shows a window to drop a repository folder on, or to choose one with **Open Folder…**. Dropping another repository on a review window opens it in a window of its own.
 
 ### With Go
 
@@ -62,6 +63,34 @@ self-review config lang ja   # or en, or auto
 ```
 
 The window is available in English and Japanese. Text meant for agents (the skill, `--help`, `check` output) is always English.
+
+## Asking questions
+
+The **💬 Questions** tab on the right holds conversations with your coding agent:
+
+- **New question** asks about the whole change.
+- **Ask about this section**, at the end of each section of the guide, asks about that section.
+- The **+** next to a line number (in the guide or in a file) asks about that line, or about the lines you selected. The line then shows its conversation under it.
+
+Type a question or a review comment and press ⌘↩. The first message of a conversation tells the agent what changed and what you are looking at; follow-ups continue the same conversation.
+
+self-review talks to the agent through the [Agent Client Protocol](https://agentclientprotocol.com/), with the agent's own login:
+
+```sh
+self-review config agent claude   # default; also gemini or codex
+```
+
+| Agent | Started as | Needs |
+| --- | --- | --- |
+| Claude Code | `npx -y @agentclientprotocol/claude-agent-acp` | Node.js 22+, Claude Code signed in |
+| Gemini CLI | `gemini --acp --approval-mode plan` | Gemini CLI signed in |
+| Codex | `npx -y @agentclientprotocol/codex-acp` | Node.js, Codex signed in |
+
+To run another ACP agent, set `"agentCommand"` in the config file (`self-review config --help` shows where) to its command line as a JSON array.
+
+The agent is kept read-only: its session is switched to plan (or read-only) mode, self-review offers it no file writing or terminal, and any permission request other than reading or searching is refused. It starts at your first question and ends when you close the window.
+
+Note that what you ask, and the code the agent reads to answer, goes to your agent's provider under your agreement with them, as when you use the agent directly. self-review itself sends nothing.
 
 ## How it works
 
@@ -104,7 +133,7 @@ self-review open [<dir>]     open the review window (returns at once; one window
 self-review check [<path>]   check guides against the repository
 self-review commits          list the commits under review and which have guides
 self-review skill            print the agent skill (--install to install it)
-self-review config           show or change settings
+self-review config           show or change settings (language, agent)
 self-review help <command>   details of a command
 ```
 
@@ -126,5 +155,6 @@ VERSION=0.1.0 NOTARY_PROFILE=<profile> scripts/build-mac.sh
 - `internal/repo` reads diffs and files from Git and picks excerpt lines
 - `internal/review` lists what can be reviewed and loads a guide with its changes
 - `internal/app` is the window (MyGo native UI), testable headless with `ui.NewTester`
+- `internal/agent` talks to coding agents over ACP, read-only
 - `internal/state`, `internal/config` keep viewed marks and settings
 - `skill/SKILL.md` is the agent skill

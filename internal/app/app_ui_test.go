@@ -1,10 +1,12 @@
 package app
 
 import (
+	"path/filepath"
 	"testing"
 
 	"github.com/egoist/mygo/ui"
 
+	"github.com/hashrock/self-review/internal/config"
 	"github.com/hashrock/self-review/internal/repo"
 	"github.com/hashrock/self-review/internal/review"
 	"github.com/hashrock/self-review/internal/testrepo"
@@ -64,6 +66,9 @@ func TestNavigateAndMarkViewed(t *testing.T) {
 	if a.active != 0 || a.tabs[0].path != "b.go" {
 		t.Fatalf("tabs: %+v active %d", a.tabs, a.active)
 	}
+	if !tt.HasText("×") {
+		t.Fatalf("no close mark on the file tab: %q", tt.Texts())
+	}
 	click(t, tt, "既読")
 	f := a.file("b.go")
 	if !f.Viewed || !a.ws.State.Viewed(f.Key) {
@@ -82,6 +87,31 @@ func TestNavigateAndMarkViewed(t *testing.T) {
 	if a.view != review.ViewCommit+hs[0] {
 		t.Fatalf("back: %q", a.view)
 	}
+
+	// The switch's label turns commit mode off again.
+	click(t, tt, "コミット単位 2")
+	if a.view != review.ViewBranch {
+		t.Fatalf("switch off: %q", a.view)
+	}
+}
+
+func TestFileTabsClose(t *testing.T) {
+	a, _ := newApp(t)
+	a.openFile("a.go", 0, 0)
+	a.openFile("b.go", 0, 0)
+	tt := ui.NewTester(a.View, 1440, 900)
+	tt.Frame()
+	if len(a.tabs) != 2 || a.active != 1 {
+		t.Fatalf("tabs %d active %d", len(a.tabs), a.active)
+	}
+	click(t, tt, "a.go") // choose the first tab
+	if a.active != 0 {
+		t.Fatalf("active %d after choosing a.go", a.active)
+	}
+	click(t, tt, "×")
+	if len(a.tabs) != 1 || a.tabs[0].path != "b.go" {
+		t.Fatalf("after close: %+v", a.tabs)
+	}
 }
 
 func TestEnglishTexts(t *testing.T) {
@@ -92,9 +122,69 @@ func TestEnglishTexts(t *testing.T) {
 	a.reload()
 	tt := ui.NewTester(a.View, 1440, 900)
 	tt.Frame()
-	for _, s := range []string{"Whole branch", "By commit 2", "Changes on this branch", "Viewed"} {
+	for _, s := range []string{"By commit 2", "Changes on this branch", "Viewed"} {
 		if !tt.HasText(s) {
 			t.Errorf("missing %q in %q", s, tt.Texts())
 		}
+	}
+}
+
+func TestWelcomeDrop(t *testing.T) {
+	dir, _ := testrepo.New(t)
+	a := New(nil, "", "en")
+	var opened string
+	a.openDir = func(d string) {
+		opened = d
+		r, err := repo.Open(d)
+		if err != nil {
+			a.errorMsg = err.Error()
+			return
+		}
+		ws, _ := review.Open(r, "", "", "")
+		a.setWorkspace(ws, "")
+		a.reload()
+	}
+	tt := ui.NewTester(a.View, 1440, 900)
+	tt.Frame()
+	for _, s := range []string{"Drop a Git repository folder here", "Open Folder…"} {
+		if !tt.HasText(s) {
+			t.Fatalf("welcome missing %q: %q", s, tt.Texts())
+		}
+	}
+	if !tt.DropFiles(720, 450, dir) {
+		t.Fatal("drop not taken")
+	}
+	tt.Frame()
+	tt.Frame()
+	if opened != dir || a.ws == nil || !tt.HasText("By commit 2") {
+		t.Fatalf("after drop: opened %q, texts %q", opened, tt.Texts())
+	}
+}
+
+func TestWelcomeRecent(t *testing.T) {
+	t.Setenv("SELF_REVIEW_CONFIG", t.TempDir()+"/config.json")
+	dir, _ := testrepo.New(t)
+	other := t.TempDir()
+	_ = config.AddRecent(other)
+	_ = config.AddRecent(dir)
+
+	a := New(nil, "", "en")
+	var opened string
+	a.openDir = func(d string) { opened = d }
+	tt := ui.NewTester(a.View, 1440, 900)
+	tt.Frame()
+	if !tt.HasText("Recent repositories") || !tt.HasText(filepath.Base(dir)) {
+		t.Fatalf("recent missing: %q", tt.Texts())
+	}
+	click(t, tt, filepath.Base(dir))
+	if opened != dir {
+		t.Fatalf("opened %q, want %q", opened, dir)
+	}
+
+	// × forgets the first entry without opening it.
+	opened = ""
+	click(t, tt, "×")
+	if opened != "" || len(a.recent) != 1 || a.recent[0].Path != other {
+		t.Fatalf("after forget: opened %q, recent %+v", opened, a.recent)
 	}
 }

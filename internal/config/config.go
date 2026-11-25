@@ -24,6 +24,19 @@ const Auto = "auto"
 type Config struct {
 	// Lang is the reader's language: "auto", or one of Languages.
 	Lang string `json:"lang,omitempty"`
+	// Agent is the coding agent questions go to: claude (default), gemini
+	// or codex. AgentCommand, when set, starts an ACP agent of your own
+	// instead, as a command and its arguments.
+	Agent        string   `json:"agent,omitempty"`
+	AgentCommand []string `json:"agentCommand,omitempty"`
+}
+
+// AgentName is the agent to use, "claude" when unset.
+func (c Config) AgentName() string {
+	if c.Agent == "" {
+		return "claude"
+	}
+	return c.Agent
 }
 
 // Path is where the settings live: <user config dir>/self-review/config.json.

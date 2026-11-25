@@ -3,9 +3,9 @@
 package app
 
 import (
-	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/egoist/mygo"
@@ -13,6 +13,8 @@ import (
 	"github.com/egoist/mygo/ui/editor"
 	"github.com/egoist/mygo/ui/markdown"
 
+	"github.com/hashrock/self-review/internal/agent"
+	"github.com/hashrock/self-review/internal/config"
 	"github.com/hashrock/self-review/internal/guide"
 	"github.com/hashrock/self-review/internal/repo"
 	"github.com/hashrock/self-review/internal/review"
@@ -43,6 +45,20 @@ type App struct {
 
 	md markdown.Options
 
+	// The agent questions go to, started at the first one, and the
+	// conversations with it (of every view; each shows in its own).
+	agents        *agentHolder
+	agentTitle    string
+	threads       []*thread
+	threadSeq     int
+	questionsOpen bool // the right pane shows Questions rather than a file
+
+	// recent lists recently opened repositories, for the welcome screen.
+	recent []config.Recent
+
+	// openDir opens a folder chosen or dropped in the window.
+	openDir func(dir string)
+
 	// pendingFile is opened on the right once the next load is done.
 	pendingFile              string
 	pendingStart, pendingEnd int
@@ -57,20 +73,42 @@ type page struct {
 	del    int
 }
 
+// readingTheme is the light theme without its blue: the window is for
+// reading, so controls and selections stay in quiet grays.
+var readingTheme = func() *ui.Theme {
+	th := ui.LightTheme()
+	th.Accent = ui.Hex("#52525b")
+	th.AccentHover = ui.Hex("#3f3f46")
+	th.AccentPressed = ui.Hex("#27272a")
+	th.Selection = ui.RGBA(113, 113, 122, 0.20)
+	th.Focus = ui.RGBA(113, 113, 122, 0.50)
+	return th
+}()
+
+// codeTheme colors the diffs: GitHub's code colors, with the selected
+// lines in gray rather than blue.
+var codeTheme = func() *editor.Theme {
+	ct := editor.DefaultTheme(readingTheme)
+	ct.Modified = ui.Hex("#a1a1aa")
+	return ct
+}()
+
 // kindMessage is a commit message body, shown as plain text.
 const kindMessage guide.BlockKind = "message"
 
 type block struct {
-	kind   guide.BlockKind
-	src    string // markdown, or the excerpt's introduction
-	path   string
-	label  string
-	start  int
-	end    int
-	status string
-	diff   *editor.DiffState
-	err    string
-	open   bool // excerpt shown (not folded)
+	kind    guide.BlockKind
+	src     string // markdown, or the excerpt's introduction
+	path    string
+	label   string
+	start   int
+	end     int
+	status  string
+	diff    *editor.DiffState
+	lines   *lineMap // the diff's lines in the file
+	section string   // markdown: the ## section this block starts, if any
+	err     string
+	open    bool // excerpt shown (not folded)
 }
 
 type tab struct {
@@ -86,11 +124,25 @@ func New(ws *review.Workspace, initialView, lang string) *App {
 	if initialView == "" {
 		initialView = review.ViewBranch
 	}
-	return &App{ws: ws, lang: lang, tx: textFor(lang), view: initialView, split: 50, changesOpen: !ws.State.ChangesClosed(), active: -1}
+	a := &App{lang: lang, tx: textFor(lang), split: 50, changesOpen: true, active: -1}
+	a.setWorkspace(ws, initialView)
+	if ws == nil {
+		a.recent = config.RecentRepos()
+	}
+	return a
 }
 
-// ErrCanceled is what an Opener returns when the user chose nothing to open.
-var ErrCanceled = errors.New("canceled")
+// setWorkspace points the app at a workspace (nil for the welcome screen).
+func (a *App) setWorkspace(ws *review.Workspace, view string) {
+	if view == "" {
+		view = review.ViewBranch
+	}
+	a.ws, a.view = ws, view
+	a.page, a.tabs, a.active, a.errorMsg = nil, nil, -1, ""
+	if ws != nil {
+		a.changesOpen = !ws.State.ChangesClosed()
+	}
+}
 
 func anyOpen(apps []*App) bool {
 	for _, a := range apps {
@@ -101,36 +153,27 @@ func anyOpen(apps []*App) bool {
 	return false
 }
 
-// ChooseRepository asks for a repository folder, as when the app is opened
-// from Finder without a command line. It returns ErrCanceled when none is
-// chosen.
-func ChooseRepository() (string, error) {
-	paths, err := mygo.Dialog.Open(mygo.OpenDialogOptions{
-		Title:       "self-review",
-		Message:     "Choose a Git repository to review",
-		ButtonLabel: "Review",
-		Directory:   true,
-	})
-	if err != nil {
-		return "", err
-	}
-	if len(paths) == 0 {
-		return "", ErrCanceled
-	}
-	return paths[0], nil
-}
-
 // Opener turns a command line (of this launch, or of a later one forwarded
-// to this process) into the workspace and view to show.
+// to this process) into what to show. "open --repo <dir>" must work too: the
+// window uses it for folders chosen or dropped in it.
 type Opener func(args []string, workingDir string) (*Request, error)
 
-// Request is what to show: a workspace, the view to start at, the reader's
+// Request is what to show: a workspace (nil for the welcome screen, as when
+// the app is opened from Finder), the view to start at, the reader's
 // language, and optionally a file to open on the right with a line range.
 type Request struct {
 	Workspace  *review.Workspace
 	View, Lang string
 	File       string
 	Start, End int
+	Agent      agent.Spec // the coding agent questions go to
+}
+
+// launcher keeps the process's windows: one per guide directory, plus at
+// most one welcome window.
+type launcher struct {
+	open Opener
+	apps []*App
 }
 
 // Main runs the app: one process for every review window. A later launch
@@ -141,60 +184,139 @@ func Main(args []string, open Opener) error {
 	if !mygo.App.RequestSingleInstanceLock() {
 		return nil // the running instance took the command line
 	}
-	var apps []*App
-	show := func(args []string, wd string) {
-		req, err := open(args, wd)
-		if errors.Is(err, ErrCanceled) {
-			if !anyOpen(apps) {
-				mygo.App.Quit() // launched from Finder and nothing chosen
+	l := &launcher{open: open}
+	mygo.App.SetLanguages("en", "ja")
+	mygo.App.OnSecondInstance(l.launch)
+	mygo.App.OnQuit(func() {
+		for _, a := range l.apps {
+			if a.agents != nil {
+				a.agents.close()
 			}
-			return
 		}
-		if err != nil {
-			mygo.Dialog.Error("self-review", err.Error())
-			if !anyOpen(apps) {
-				mygo.App.Quit()
-			}
-			return
+	})
+	wd, _ := os.Getwd()
+	mygo.App.WhenReady(func() { l.launch(args, wd) })
+	return mygo.App.Run()
+}
+
+// launch shows what a command line asks for.
+func (l *launcher) launch(args []string, wd string) {
+	req, err := l.open(args, wd)
+	if err != nil {
+		mygo.Dialog.Error("self-review", err.Error())
+		if !anyOpen(l.apps) {
+			mygo.App.Quit()
 		}
-		for _, a := range apps {
-			if a.ws.Dir == req.Workspace.Dir && a.win != nil && !a.win.IsDestroyed() {
-				a.win.Update(func() {
-					a.pendingFile, a.pendingStart, a.pendingEnd = req.File, req.Start, req.End
-					if req.View != "" && req.View != a.view {
-						a.selectView(req.View)
-					} else {
-						a.reload()
-					}
-				})
+		return
+	}
+	l.show(req, nil)
+}
+
+// show shows req in the window of the same guides if one is open, else in
+// into (a welcome window to turn into a review), else in a new window.
+func (l *launcher) show(req *Request, into *App) {
+	mygo.App.SetLocale(req.Lang) // MyGo's own controls and menus follow
+	if req.Workspace != nil {
+		_ = config.AddRecent(req.Workspace.Repo.Root) // a convenience: losing it is harmless
+	}
+	if req.Workspace == nil {
+		for _, a := range l.apps {
+			if a.ws == nil && a.win != nil && !a.win.IsDestroyed() {
 				a.win.Show()
 				a.win.Focus()
 				return
 			}
 		}
-		mygo.App.SetLocale(req.Lang) // MyGo's own controls and menus follow
-		a := New(req.Workspace, req.View, req.Lang)
-		a.pendingFile, a.pendingStart, a.pendingEnd = req.File, req.Start, req.End
-		a.open()
-		apps = append(apps, a)
+		l.newWindow(New(nil, "", req.Lang))
+		return
 	}
-	mygo.App.SetLanguages("en", "ja")
-	mygo.App.OnSecondInstance(show)
-	wd, _ := os.Getwd()
-	mygo.App.WhenReady(func() { show(args, wd) })
-	return mygo.App.Run()
+	for _, a := range l.apps {
+		if a.ws != nil && a.ws.Dir == req.Workspace.Dir && a.win != nil && !a.win.IsDestroyed() {
+			a.pendingFile, a.pendingStart, a.pendingEnd = req.File, req.Start, req.End
+			if req.View != "" && req.View != a.view {
+				a.selectView(req.View)
+			} else {
+				a.reload()
+			}
+			a.win.Show()
+			a.win.Focus()
+			return
+		}
+	}
+	if into != nil && into.ws == nil {
+		into.setWorkspace(req.Workspace, req.View)
+		into.setAgent(req.Agent)
+		into.pendingFile, into.pendingStart, into.pendingEnd = req.File, req.Start, req.End
+		into.win.SetTitle(into.title())
+		into.reload()
+		return
+	}
+	a := New(req.Workspace, req.View, req.Lang)
+	a.setAgent(req.Agent)
+	a.pendingFile, a.pendingStart, a.pendingEnd = req.File, req.Start, req.End
+	l.newWindow(a)
+}
+
+func (l *launcher) newWindow(a *App) {
+	a.openDir = func(dir string) { l.openDir(dir, a) }
+	a.open()
+	l.apps = append(l.apps, a)
+}
+
+// openDir opens a folder chosen or dropped in a's window. A file stands for
+// the folder it is in.
+func (l *launcher) openDir(dir string, a *App) {
+	if st, err := os.Stat(dir); err == nil && !st.IsDir() {
+		dir = filepath.Dir(dir)
+	}
+	req, err := l.open([]string{"open", "--repo", dir}, "")
+	if err != nil {
+		a.errorMsg = err.Error()
+		return
+	}
+	a.errorMsg = ""
+	l.show(req, a)
+}
+
+// chooseFolder asks for a folder; "" when none is chosen.
+func (a *App) chooseFolder() string {
+	paths, err := mygo.Dialog.Open(mygo.OpenDialogOptions{
+		Parent:      a.win,
+		Title:       "self-review",
+		Message:     a.tx.ChooseRepo,
+		ButtonLabel: a.tx.Review,
+		Directory:   true,
+	})
+	if err != nil || len(paths) == 0 {
+		return ""
+	}
+	return paths[0]
 }
 
 // open creates the window; call on the main thread.
 func (a *App) open() {
 	a.win = mygo.NewWindow(mygo.WindowOptions{
-		Title:   "self-review — " + a.ws.Repo.Name(),
+		Title:   a.title(),
 		Width:   1440,
 		Height:  900,
 		Content: ui.View(a.View),
 	})
 	a.win.Focus()
-	a.reload()
+	a.win.OnClosed(func() {
+		if a.agents != nil {
+			a.agents.close() // the agent ends with its window
+		}
+	})
+	if a.ws != nil {
+		a.reload()
+	}
+}
+
+func (a *App) title() string {
+	if a.ws == nil {
+		return "self-review"
+	}
+	return "self-review — " + a.ws.Repo.Name()
 }
 
 // Reload reads the views and the current view again, as after the guide changed.
@@ -206,6 +328,9 @@ func (a *App) Reload() {
 
 // reload loads off the main thread and swaps the result in on it.
 func (a *App) reload() {
+	if a.ws == nil {
+		return
+	}
 	a.loadSeq++
 	seq, view := a.loadSeq, a.view
 	a.loading = true
@@ -291,7 +416,8 @@ func (a *App) buildPage(view string) (*page, error) {
 				bl.err = a.tx.NoLinesInRange
 				break
 			}
-			bl.diff = excerptDiff(b.Path, fd.Lines, groups)
+			bl.diff, bl.lines = excerptDiff(b.Path, fd.Lines, groups)
+			a.wireDiff(bl.diff, b.Path, bl.lines)
 		}
 		return bl
 	}
@@ -308,7 +434,7 @@ func (a *App) buildPage(view string) (*page, error) {
 	for _, b := range l.Guide.Blocks {
 		switch b.Kind {
 		case guide.KindMarkdown:
-			p.blocks = append(p.blocks, block{kind: b.Kind, src: b.Markdown})
+			p.blocks = append(p.blocks, splitSections(b.Markdown)...)
 		case guide.KindExcerpt:
 			p.blocks = append(p.blocks, excerpt(b))
 		case guide.KindRelated:
@@ -318,10 +444,34 @@ func (a *App) buildPage(view string) (*page, error) {
 	return p, nil
 }
 
+// splitSections cuts markdown at its ## headings, so each section's first
+// block knows the section it starts.
+func splitSections(src string) []block {
+	var out []block
+	var cur []string
+	title := ""
+	flush := func() {
+		if text := strings.Trim(strings.Join(cur, "\n"), "\n"); text != "" || title != "" {
+			out = append(out, block{kind: guide.KindMarkdown, src: text, section: title})
+		}
+		cur, title = nil, ""
+	}
+	for _, line := range strings.Split(src, "\n") {
+		if strings.HasPrefix(line, "## ") {
+			flush()
+			title = strings.TrimSpace(line[3:])
+		}
+		cur = append(cur, line)
+	}
+	flush()
+	return out
+}
+
 // excerptDiff shows the chosen line groups as hunks of a patch, so the viewer
 // numbers them as in the files and highlights them in the file's language.
-func excerptDiff(path string, lines []repo.Line, groups [][]int) *editor.DiffState {
+func excerptDiff(path string, lines []repo.Line, groups [][]int) (*editor.DiffState, *lineMap) {
 	fp := editor.FilePatch{OldName: path, NewName: path}
+	m := &lineMap{}
 	for _, g := range groups {
 		h := editor.PatchHunk{}
 		prevOld, prevNew := 0, 0
@@ -338,6 +488,12 @@ func excerptDiff(path string, lines []repo.Line, groups [][]int) *editor.DiffSta
 		}
 		for _, idx := range g {
 			l := lines[idx]
+			if l.Old > 0 {
+				m.old = append(m.old, l.Old)
+			}
+			if l.New > 0 {
+				m.new = append(m.new, l.New)
+			}
 			switch l.Type {
 			case repo.Context:
 				h.Lines = append(h.Lines, " "+l.Text)
@@ -366,14 +522,15 @@ func excerptDiff(path string, lines []repo.Line, groups [][]int) *editor.DiffSta
 		}
 		fp.Hunks = append(fp.Hunks, h)
 	}
-	d := &editor.DiffState{Layout: editor.DiffUnified, FitContent: true, Indicators: editor.DiffClassic}
+	d := &editor.DiffState{Layout: editor.DiffUnified, FitContent: true, Indicators: editor.DiffClassic, Theme: codeTheme}
 	d.SetPatch(fp)
-	return d
+	return d, m
 }
 
 // ---------- tabs and files ----------
 
 func (a *App) openFile(path string, start, end int) {
+	a.questionsOpen = false
 	if end == 0 {
 		end = start
 	}
@@ -415,7 +572,8 @@ func (a *App) loadTab(t *tab) {
 		old.SetLanguage(l)
 		nw.SetLanguage(l)
 	}
-	t.diff = &editor.DiffState{Old: old, New: nw, Layout: editor.DiffUnified, ExpandUnchanged: true, Indicators: editor.DiffClassic}
+	t.diff = &editor.DiffState{Old: old, New: nw, Layout: editor.DiffUnified, ExpandUnchanged: true, Indicators: editor.DiffClassic, Theme: codeTheme}
+	a.wireDiff(t.diff, t.path, nil)
 	if t.start > 0 {
 		t.diff.SetSelectedLines(editor.DiffLineRange{Side: editor.DiffNew, Start: t.start - 1, End: t.end - 1}, true)
 	}
@@ -496,8 +654,12 @@ func (a *App) step(d int) {
 
 // View builds the window from the state, every frame.
 func (a *App) View(c *ui.Context) {
-	c.SetTheme(ui.LightTheme())
+	c.SetTheme(readingTheme)
 	t := c.Theme()
+	if a.ws == nil {
+		a.welcomeView(c)
+		return
+	}
 
 	if c.Shortcut(0, ui.KeyR) {
 		a.reload()
@@ -517,7 +679,12 @@ func (a *App) View(c *ui.Context) {
 		}
 	}
 
-	ui.Column(c).Fill().Background(t.Background).Children(func() {
+	root := ui.Column(c).Fill().Background(t.Background)
+	// Another repository dropped anywhere opens in its own window.
+	if files := root.DroppedFiles(); len(files) > 0 && a.openDir != nil {
+		a.openDir(files[0])
+	}
+	root.Children(func() {
 		a.topBar(c)
 		ui.Divider(c)
 		ui.SplitPercent(c, &a.split, func() { a.leftPane(c) }, func() { a.rightPane(c) }).Grow(1)
@@ -526,23 +693,101 @@ func (a *App) View(c *ui.Context) {
 	})
 }
 
+// welcomeView is the window of an app opened without a repository: a place
+// to drop one, or to choose it.
+func (a *App) welcomeView(c *ui.Context) {
+	t := c.Theme()
+	root := ui.Column(c).Fill().Background(t.Background).Justify(ui.Center).AlignItems(ui.Center).Padding(32)
+	files := root.DroppedFiles()
+	over := root.FileDragOver()
+	if len(files) > 0 && a.openDir != nil {
+		a.openDir(files[0])
+	}
+	root.Children(func() {
+		zone := ui.Column(c).Width(520).Padding(40, 32).Gap(14).Radius(16).AlignItems(ui.Center).
+			Background(t.Surface).Border(2, t.Border)
+		if over {
+			zone.Border(2, t.TextMuted).Background(t.SurfaceHover)
+		}
+		zone.Children(func() {
+			ui.Text(c, "self-review").FontSize(26).Bold()
+			ui.Text(c, a.tx.DropHere).FontSize(15).TextColor(t.TextMuted).TextAlign(ui.Center)
+			if ui.Button(c.Key("open-folder"), a.tx.OpenFolder).Clicked() {
+				if dir := a.chooseFolder(); dir != "" && a.openDir != nil {
+					a.openDir(dir)
+				}
+			}
+			ui.Text(c, a.tx.OrRun).FontSize(12).TextColor(t.TextMuted).TextAlign(ui.Center)
+			if a.errorMsg != "" {
+				ui.Text(c, a.errorMsg).FontSize(12).TextColor(t.Danger).TextAlign(ui.Center).MaxWidth(440)
+			}
+		})
+		if len(a.recent) > 0 {
+			a.recentList(c)
+		}
+	})
+}
+
+// recentList lists recently opened repositories: click one to open it, ×
+// to forget it.
+func (a *App) recentList(c *ui.Context) {
+	t := c.Theme()
+	home, _ := os.UserHomeDir()
+	forget := ""
+	ui.Column(c).Width(520).MarginY(24).Gap(2).Children(func() {
+		ui.Text(c, a.tx.Recent).FontSize(12).Bold().TextColor(t.TextMuted).PaddingX(12).MarginY(4)
+		for _, r := range a.recent {
+			path := r.Path
+			shown := path
+			if home != "" && strings.HasPrefix(path, home+string(filepath.Separator)) {
+				shown = "~" + path[len(home):]
+			}
+			ui.Row(c.Key("recent-" + path)).AlignItems(ui.Center).Children(func() {
+				// The × sits beside the clickable row, so forgetting never opens.
+				row := ui.Row(c).Gap(10).AlignItems(ui.Center).PaddingX(12).PaddingY(6).Radius(6).Grow(1).Cursor(ui.CursorPointer)
+				if row.Hovered() {
+					row.Background(t.SurfaceHover)
+				}
+				if row.Clicked() && a.openDir != nil {
+					a.openDir(path)
+				}
+				row.Children(func() {
+					ui.Text(c, filepath.Base(path)).FontSize(13).Bold()
+					ui.Text(c, shown).FontSize(12).TextColor(t.TextMuted).SingleLine().TruncateStart().Grow(1).Shrink(1).MinWidth(0)
+				})
+				if ui.Text(c, "×").FontSize(12).TextColor(t.TextMuted).Padding(6).Cursor(ui.CursorPointer).Tooltip(a.tx.Forget).Clicked() {
+					forget = path
+				}
+			})
+		}
+	})
+	if forget != "" {
+		_ = config.RemoveRecent(forget)
+		a.recent = config.RecentRepos()
+	}
+}
+
 func (a *App) topBar(c *ui.Context) {
 	t := c.Theme()
 	ui.Row(c).PaddingX(12).PaddingY(6).Gap(12).AlignItems(ui.Center).Children(func() {
-		ui.Row(c).Children(func() {
-			if toggleButton(c.Key("mode-branch"), a.tx.Whole, !a.commitMode()).Clicked() {
-				a.selectView(review.ViewBranch)
-			}
+		// One switch: off shows the whole branch, on steps through commits.
+		ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+			on := a.commitMode()
 			label := fmt.Sprintf(a.tx.CommitsMode, len(a.list))
-			if toggleButton(c.Key("mode-commits"), label, a.commitMode()).Clicked() && !a.commitMode() && len(a.list) > 0 {
-				pick := a.list[0]
-				for _, e := range a.list {
-					if !e.Done() {
-						pick = e
-						break
-					}
+			sw := ui.Switch(c.Key("mode"), &on).Label(label).Disabled(len(a.list) == 0 && !a.commitMode())
+			if sw.Changed() {
+				if on {
+					a.enterCommitMode()
+				} else {
+					a.selectView(review.ViewBranch)
 				}
-				a.selectView(pick.View)
+			}
+			if ui.Text(c, label).FontSize(13).TextColor(t.TextMuted).Cursor(ui.CursorPointer).Clicked() {
+				if a.commitMode() {
+					a.selectView(review.ViewBranch)
+				} else {
+					a.enterCommitMode()
+				}
 			}
 		})
 		title := a.tx.Loading
@@ -569,14 +814,6 @@ func (a *App) entryTitle(e review.Entry) string {
 		return a.tx.WorktreeTitle
 	}
 	return e.Title
-}
-
-// toggleButton is a button drawn as primary while on.
-func toggleButton(c *ui.Context, label string, on bool) ui.Element {
-	if on {
-		return ui.PrimaryButton(c, label)
-	}
-	return ui.Button(c, label)
 }
 
 func (a *App) commitBar(c *ui.Context) {
@@ -663,7 +900,7 @@ func (a *App) leftPane(c *ui.Context) {
 								loc += fmt.Sprintf("-%d", r.end)
 							}
 							ui.Row(c.Key(fmt.Sprintf("rel-%s-%d-%d", r.path, r.start, i))).Gap(8).Children(func() {
-								if ui.Text(c, r.label).TextColor(t.Accent).Cursor(ui.CursorPointer).Clicked() {
+								if ui.Text(c, r.label).Underline().Cursor(ui.CursorPointer).Clicked() {
 									a.openFile(r.path, r.start, r.end)
 								}
 								ui.Text(c, loc).FontSize(12).TextColor(t.TextMuted)
@@ -671,10 +908,24 @@ func (a *App) leftPane(c *ui.Context) {
 						}
 					})
 				}
+				section := "" // the ## section being shown, to ask about at its end
+				askSection := func() {
+					if section == "" {
+						return
+					}
+					title := section
+					if ui.Text(c.Key("ask-"+title), "💬 "+a.tx.AskSection).FontSize(12).TextColor(t.TextMuted).Cursor(ui.CursorPointer).Clicked() {
+						a.askSection(title)
+					}
+				}
 				for i := range p.blocks {
 					b := &p.blocks[i]
 					if b.kind != guide.KindRelated {
 						flush()
+					}
+					if b.section != "" {
+						askSection()
+						section = b.section
 					}
 					cc := c.Key(fmt.Sprintf("block-%d", i))
 					switch b.kind {
@@ -689,6 +940,7 @@ func (a *App) leftPane(c *ui.Context) {
 					}
 				}
 				flush()
+				askSection()
 				if len(p.blocks) == 0 {
 					ui.Text(c, a.tx.NoChanges).TextColor(t.TextMuted)
 				}
@@ -733,6 +985,7 @@ func (a *App) excerptView(c *ui.Context, b *block) {
 			return
 		}
 		ui.Box(c).FillWidth().Border(1, t.Border).Radius(6).Clip().Children(func() {
+			a.annotate(b.diff, b.path, b.lines)
 			editor.DiffView(c, b.diff).FillWidth()
 		})
 	})
@@ -746,6 +999,84 @@ func (a *App) viewedBox(c *ui.Context, path string) {
 	v := f.Viewed
 	if ui.Checkbox(c.Key("viewed-"+path), &v, a.tx.Viewed).Changed() {
 		a.setViewed(f, v)
+	}
+}
+
+// enterCommitMode shows the first commit not fully viewed, else the first.
+func (a *App) enterCommitMode() {
+	if len(a.list) == 0 {
+		return
+	}
+	pick := a.list[0]
+	for _, e := range a.list {
+		if !e.Done() {
+			pick = e
+			break
+		}
+	}
+	a.selectView(pick.View)
+}
+
+// questionsTab is the pinned first tab: the conversations with the agent.
+func (a *App) questionsTab(c *ui.Context) {
+	t := c.Theme()
+	label := a.tx.Questions
+	if n := len(a.viewThreads()); n > 0 {
+		label = fmt.Sprintf("%s %d", label, n)
+	}
+	tab := ui.Row(c.Key("questions-tab")).AlignItems(ui.Center).PaddingX(10).PaddingY(4).Radius(6).Cursor(ui.CursorPointer)
+	if a.questionsOpen {
+		tab.Background(t.Background).Border(1, t.Border)
+	} else if tab.Hovered() {
+		tab.Background(t.SurfaceHover)
+	}
+	if tab.Clicked() {
+		a.questionsOpen = true
+	}
+	tab.Children(func() {
+		col := t.TextMuted
+		if a.questionsOpen {
+			col = t.Text
+		}
+		ui.Text(c, "💬 "+label).FontSize(12).TextColor(col)
+	})
+}
+
+// fileTabs are the open files, as tabs: the chosen one joins the page
+// below it, the others sit on the bar. Each closes with its ×.
+func (a *App) fileTabs(c *ui.Context) {
+	t := c.Theme()
+	if len(a.tabs) == 0 {
+		return
+	}
+	closeAt := -1
+	tabs := ui.TabsBase(c.Key("file-tabs"), &a.active, len(a.tabs))
+	tabs.List.Gap(2).AlignItems(ui.Center).Children(func() {
+		for i, tb := range a.tabs {
+			name := tb.path[strings.LastIndex(tb.path, "/")+1:]
+			tab := tabs.Tab(i).Row().Gap(6).AlignItems(ui.Center).PaddingX(10).PaddingY(4).Radius(6).Tooltip(tb.path)
+			if tab.Clicked() {
+				a.questionsOpen = false
+			}
+			if i == a.active && !a.questionsOpen {
+				tab.Background(t.Background).Border(1, t.Border)
+			} else if tab.Hovered() {
+				tab.Background(t.SurfaceHover)
+			}
+			tab.Children(func() {
+				col := t.TextMuted
+				if i == a.active && !a.questionsOpen {
+					col = t.Text
+				}
+				ui.Text(c, name).FontSize(12).TextColor(col)
+				if ui.Text(c, "×").FontSize(12).TextColor(t.TextMuted).Cursor(ui.CursorPointer).Tooltip(a.tx.Close).Clicked() {
+					closeAt = i
+				}
+			})
+		}
+	})
+	if closeAt >= 0 {
+		a.closeTab(closeAt)
 	}
 }
 
@@ -770,25 +1101,19 @@ func (a *App) rightPane(c *ui.Context) {
 			if ui.Button(c.Key("changes"), fmt.Sprintf("%s Changes %d/%d", arrow, done, n)).Tooltip(a.tx.ToggleChanges).Clicked() {
 				a.toggleChanges()
 			}
-			for i, tb := range a.tabs {
-				i := i
-				name := tb.path[strings.LastIndex(tb.path, "/")+1:]
-				ui.Row(c.Key("tab-" + tb.path)).Gap(2).Children(func() {
-					if toggleButton(c, name, i == a.active).Tooltip(tb.path).Clicked() {
-						a.active = i
-					}
-					if ui.Button(c, "×").Tooltip(a.tx.Close).Clicked() {
-						a.closeTab(i)
-					}
-				})
-			}
+			a.questionsTab(c)
+			a.fileTabs(c)
 		})
 		ui.Divider(c)
 		ui.Row(c).Grow(1).FillWidth().Children(func() {
 			if a.changesOpen {
 				a.changesList(c)
 			}
-			a.fileView(c)
+			if a.questionsOpen {
+				a.questionsPanel(c)
+			} else {
+				a.fileView(c)
+			}
 		})
 	})
 }
@@ -812,7 +1137,7 @@ func (a *App) changesList(c *ui.Context) {
 				}
 				row := ui.Row(c.Key("chg-" + f.Path)).Gap(6).PaddingX(8).PaddingY(3).AlignItems(ui.Center).FillWidth()
 				if f.Path == activePath {
-					row = row.Background(t.Selection)
+					row = row.Background(t.SurfaceHover)
 				}
 				row.Children(func() {
 					v := f.Viewed
@@ -867,6 +1192,7 @@ func (a *App) fileView(c *ui.Context) {
 		if tb.diff == nil {
 			return
 		}
+		a.annotate(tb.diff, tb.path, nil)
 		editor.DiffView(c.Key("file-"+tb.path), tb.diff).Grow(1).FillWidth()
 		if tb.scrollTo > 0 && tb.diff.ViewportHeight() > 0 {
 			y := tb.diff.LineTop(editor.DiffNew, tb.scrollTo-1) - tb.diff.ViewportHeight()/3
