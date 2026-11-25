@@ -29,6 +29,8 @@ type Config struct {
 	// instead, as a command and its arguments.
 	Agent        string   `json:"agent,omitempty"`
 	AgentCommand []string `json:"agentCommand,omitempty"`
+	// NoMovePrompt stops offering to move the app into Applications.
+	NoMovePrompt bool `json:"noMovePrompt,omitempty"`
 }
 
 // AgentName is the agent to use, "claude" when unset.

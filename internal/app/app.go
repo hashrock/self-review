@@ -16,6 +16,7 @@ import (
 	"github.com/hashrock/self-review/internal/agent"
 	"github.com/hashrock/self-review/internal/config"
 	"github.com/hashrock/self-review/internal/guide"
+	"github.com/hashrock/self-review/internal/install"
 	"github.com/hashrock/self-review/internal/repo"
 	"github.com/hashrock/self-review/internal/review"
 )
@@ -52,6 +53,10 @@ type App struct {
 	threads       []*thread
 	threadSeq     int
 	questionsOpen bool // the right pane shows Questions rather than a file
+
+	// cli is whether the command-line tool needs installing, for the
+	// welcome screen: checked in the background, as it asks the login shell.
+	cli cliState
 
 	// recent lists recently opened repositories, for the welcome screen.
 	recent []config.Recent
@@ -132,6 +137,36 @@ func New(ws *review.Workspace, initialView, lang string) *App {
 	return a
 }
 
+type cliState struct {
+	checked, needed bool
+	message         string // after installing: where, or what went wrong
+	failed          bool
+}
+
+// checkCLI finds out whether to offer installing the command, when running
+// from the app bundle.
+func (a *App) checkCLI() {
+	if _, inApp := install.Binary(); !inApp {
+		return
+	}
+	go func() {
+		st := install.Check()
+		a.update(func() { a.cli.checked, a.cli.needed = true, !st.Ours })
+	}()
+}
+
+func (a *App) installCLI() {
+	res, err := install.Install()
+	switch {
+	case err != nil:
+		a.cli.message, a.cli.failed = err.Error(), true
+	case res.Shadowed != "":
+		a.cli.message, a.cli.failed = fmt.Sprintf(a.tx.CLIShadowed, res.Link, res.Shadowed), true
+	default:
+		a.cli.message, a.cli.failed, a.cli.needed = fmt.Sprintf(a.tx.CLIInstalled, res.Link), false, false
+	}
+}
+
 // setWorkspace points the app at a workspace (nil for the welcome screen).
 func (a *App) setWorkspace(ws *review.Workspace, view string) {
 	if view == "" {
@@ -195,7 +230,13 @@ func Main(args []string, open Opener) error {
 		}
 	})
 	wd, _ := os.Getwd()
-	mygo.App.WhenReady(func() { l.launch(args, wd) })
+	mygo.App.WhenReady(func() {
+		// Opened from Finder: offer to move into Applications first.
+		if args == nil && offerMove() {
+			return
+		}
+		l.launch(args, wd)
+	})
 	return mygo.App.Run()
 }
 
@@ -260,6 +301,9 @@ func (l *launcher) show(req *Request, into *App) {
 func (l *launcher) newWindow(a *App) {
 	a.openDir = func(dir string) { l.openDir(dir, a) }
 	a.open()
+	if a.ws == nil {
+		a.checkCLI()
+	}
 	l.apps = append(l.apps, a)
 }
 
@@ -276,6 +320,51 @@ func (l *launcher) openDir(dir string, a *App) {
 	}
 	a.errorMsg = ""
 	l.show(req, a)
+}
+
+// offerMove asks to move the app into Applications when it runs from
+// elsewhere, as from Downloads. It reports whether the app is moving (and
+// relaunching from there), when nothing else should be shown.
+func offerMove() bool {
+	bundle, ok := install.OutsideApplications()
+	if !ok {
+		return false
+	}
+	cfg, _ := config.Load()
+	if cfg.NoMovePrompt {
+		return false
+	}
+	tx := textFor(cfg.ResolvedLang())
+	res, err := mygo.Dialog.Message(mygo.MessageOptions{
+		Title:         "self-review",
+		Message:       tx.MoveTitle,
+		Detail:        tx.MoveDetail,
+		Buttons:       []string{tx.MoveButton, tx.NotNow},
+		DefaultButton: 0,
+		CancelButton:  1,
+		CheckboxLabel: tx.DontAskAgain,
+	})
+	if err != nil {
+		return false
+	}
+	if res.CheckboxChecked {
+		cfg.NoMovePrompt = true
+		_ = config.Save(cfg)
+	}
+	if res.Button != 0 {
+		return false
+	}
+	dest, err := install.MoveToApplications(bundle)
+	if err != nil {
+		mygo.Dialog.Error("self-review", err.Error())
+		return false
+	}
+	if err := install.Relaunch(dest); err != nil {
+		mygo.Dialog.Error("self-review", err.Error())
+		return false
+	}
+	mygo.App.Quit()
+	return true
 }
 
 // chooseFolder asks for a folder; "" when none is chosen.
@@ -724,6 +813,23 @@ func (a *App) welcomeView(c *ui.Context) {
 		})
 		if len(a.recent) > 0 {
 			a.recentList(c)
+		}
+		if a.cli.needed || a.cli.message != "" {
+			ui.Column(c).Width(520).MarginY(8).Gap(6).AlignItems(ui.Center).Children(func() {
+				if a.cli.needed {
+					ui.Text(c, a.tx.CLIHint).FontSize(12).TextColor(t.TextMuted).TextAlign(ui.Center)
+					if ui.Button(c.Key("install-cli"), a.tx.InstallCLI).Clicked() {
+						a.installCLI()
+					}
+				}
+				if a.cli.message != "" {
+					col := t.TextMuted
+					if a.cli.failed {
+						col = t.Danger
+					}
+					ui.Text(c, a.cli.message).FontSize(12).TextColor(col).TextAlign(ui.Center).MaxWidth(500)
+				}
+			})
 		}
 	})
 }

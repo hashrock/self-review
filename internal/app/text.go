@@ -4,33 +4,35 @@ import "fmt"
 
 // text is every string the window shows, in one language.
 type text struct {
-	Whole, CommitsMode                                 string // mode buttons; CommitsMode takes the count
-	Loading                                            string
-	Reload, Prev, Next                                 string // tooltips
-	NoGuideMark                                        string // after a commit without a guide in the list
-	NoGuide, GuideGoesAt                               string
-	WholeTitle, WorktreeTitle                          string
-	Related                                            string
-	NoChanges                                          string
-	OpenRight                                          string
-	Added, Deleted, Unchanged                          string // badges
-	Viewed                                             string
-	ToggleChanges, Close                               string
-	PickFile                                           string
-	Problems                                           string // takes the count
-	FileNotFound, Binary                               string
-	NoLinesInRange                                     string
-	NotInComparison                                    string
-	CannotSaveViewed                                   string
-	CmpBranch, CmpUncommitted                          string // CmpBranch takes base and hash
-	CmpCommit, CmpDirect                               string // CmpCommit takes the hash; CmpDirect old and new
-	WorkingTree                                        string
-	DropHere, OpenFolder, OrRun                        string // welcome screen
-	ChooseRepo, Review                                 string // folder dialog
-	Recent, Forget                                     string // recent repositories on the welcome screen
-	Questions, NewQuestion, AskSection, AskPlaceholder string // questions to the agent
-	Send, Stop, Delete, ReadOnly, WholeChange          string
-	SectionLabel, Thinking, NoQuestions                string // SectionLabel and Thinking take a name
+	Whole, CommitsMode                                      string // mode buttons; CommitsMode takes the count
+	Loading                                                 string
+	Reload, Prev, Next                                      string // tooltips
+	NoGuideMark                                             string // after a commit without a guide in the list
+	NoGuide, GuideGoesAt                                    string
+	WholeTitle, WorktreeTitle                               string
+	Related                                                 string
+	NoChanges                                               string
+	OpenRight                                               string
+	Added, Deleted, Unchanged                               string // badges
+	Viewed                                                  string
+	ToggleChanges, Close                                    string
+	PickFile                                                string
+	Problems                                                string // takes the count
+	FileNotFound, Binary                                    string
+	NoLinesInRange                                          string
+	NotInComparison                                         string
+	CannotSaveViewed                                        string
+	CmpBranch, CmpUncommitted                               string // CmpBranch takes base and hash
+	CmpCommit, CmpDirect                                    string // CmpCommit takes the hash; CmpDirect old and new
+	WorkingTree                                             string
+	DropHere, OpenFolder, OrRun                             string // welcome screen
+	ChooseRepo, Review                                      string // folder dialog
+	Recent, Forget                                          string // recent repositories on the welcome screen
+	Questions, NewQuestion, AskSection, AskPlaceholder      string // questions to the agent
+	Send, Stop, Delete, ReadOnly, WholeChange               string
+	SectionLabel, Thinking, NoQuestions                     string // SectionLabel and Thinking take a name
+	InstallCLI, CLIHint, CLIInstalled, CLIShadowed          string // CLIInstalled takes the link; CLIShadowed the link and the other command
+	MoveTitle, MoveDetail, MoveButton, NotNow, DontAskAgain string // moving the app into Applications
 }
 
 var texts = map[string]*text{
@@ -74,6 +76,15 @@ var texts = map[string]*text{
 		WholeChange:    "The whole change",
 		SectionLabel:   "Section: %s",
 		Thinking:       "%s is thinking…",
+		InstallCLI:     "Install Command-Line Tool",
+		MoveTitle:      "Move self-review to the Applications folder?",
+		MoveDetail:     "It runs from outside Applications now. Moved, it stays where macOS expects apps, and the command-line tool can link to it.",
+		MoveButton:     "Move to Applications",
+		NotNow:         "Not Now",
+		DontAskAgain:   "Don't ask again",
+		CLIHint:        "Agents run self-review from the shell to check and open guides.",
+		CLIInstalled:   "Installed: %s",
+		CLIShadowed:    "Linked %s, but %s comes first on your PATH and runs instead.",
 		NoQuestions:    "Ask the agent about the whole change (New question), a section of the guide, or lines: use the + next to a line number.",
 	},
 	"ja": {
@@ -116,6 +127,15 @@ var texts = map[string]*text{
 		WholeChange:    "変更全体",
 		SectionLabel:   "セクション: %s",
 		Thinking:       "%s が考えています…",
+		InstallCLI:     "コマンドラインツールをインストール",
+		MoveTitle:      "self-review をアプリケーションフォルダに移動しますか？",
+		MoveDetail:     "いまはアプリケーションフォルダの外で動いています。移動しておくと、コマンドラインツールのリンク先も変わらずに済みます。",
+		MoveButton:     "アプリケーションフォルダに移動",
+		NotNow:         "今はしない",
+		DontAskAgain:   "今後は確認しない",
+		CLIHint:        "エージェントはシェルから self-review を実行して、ガイドの検査や表示をします。",
+		CLIInstalled:   "インストールしました: %s",
+		CLIShadowed:    "%s にリンクしましたが、PATH で先に見つかる %s が使われます。",
 		NoQuestions:    "変更全体（新しい質問）、ガイドのセクション、行（行番号の横の ＋）について、エージェントに質問できます。",
 	},
 }

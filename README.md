@@ -18,13 +18,15 @@ A plain diff shows a change file by file. A good explanation shows it in the ord
 
 ### macOS app
 
-Download `self-review-<version>-macos.zip` from [Releases](https://github.com/hashrock/self-review/releases), unzip it and move `self-review.app` to `/Applications`. The app is signed and notarized.
+Download `self-review-<version>-macos.zip` from [Releases](https://github.com/hashrock/self-review/releases), unzip it and open `self-review.app`. If it runs from outside Applications, it offers to move itself there. The app is signed and notarized.
 
-The app is also the command-line tool. Put it on your `PATH`:
+The app is also the command-line tool, which agents run to check and open guides. Put it on your `PATH` with **Install Command-Line Tool** on the app's welcome window, or:
 
 ```sh
-sudo ln -s /Applications/self-review.app/Contents/MacOS/self-review /usr/local/bin/self-review
+/Applications/self-review.app/Contents/MacOS/self-review install-cli
 ```
+
+This links `self-review` into the first of `~/.local/bin`, `~/bin`, `/opt/homebrew/bin` and `/usr/local/bin` that is on your PATH and writable (else `/usr/local/bin`, asking for an administrator's password). The link points into the app, so updating the app updates the command.
 
 Opening the app from Finder shows a window to drop a repository folder on, or to choose one with **Open Folder…**. Dropping another repository on a review window opens it in a window of its own.
 

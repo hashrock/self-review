@@ -18,6 +18,8 @@ import (
 	"sync"
 
 	"github.com/coder/acp-go-sdk"
+
+	"github.com/hashrock/self-review/internal/shellenv"
 )
 
 // Agents self-review knows how to start. Versions are pinned: the adapters
@@ -75,7 +77,7 @@ func Start(ctx context.Context, spec Spec, cwd string) (*Client, error) {
 	}
 	cmd := exec.Command(spec.Command[0], spec.Command[1:]...)
 	cmd.Dir = cwd
-	cmd.Env = append(withLoginPath(os.Environ()), spec.Env...)
+	cmd.Env = append(shellenv.Environ(os.Environ()), spec.Env...)
 	cmd.SysProcAttr = ownGroup()
 	stderr := &bytes.Buffer{}
 	cmd.Stderr = &limitedWriter{buf: stderr, max: 64 << 10}
@@ -293,26 +295,4 @@ func (w *limitedWriter) Write(p []byte) (int, error) {
 		w.buf.Next(over)
 	}
 	return len(p), nil
-}
-
-var (
-	loginPathOnce sync.Once
-	loginPath     string
-)
-
-// withLoginPath gives env the PATH of the user's login shell, so agents
-// installed with npm, mise, Homebrew... are found when the app was opened
-// from Finder, whose PATH is minimal.
-func withLoginPath(env []string) []string {
-	loginPathOnce.Do(func() { loginPath = shellPath() })
-	if loginPath == "" {
-		return env
-	}
-	out := make([]string, 0, len(env)+1)
-	for _, kv := range env {
-		if !strings.HasPrefix(kv, "PATH=") {
-			out = append(out, kv)
-		}
-	}
-	return append(out, "PATH="+loginPath)
 }

@@ -15,6 +15,7 @@ import (
 	"github.com/hashrock/self-review/internal/app"
 	"github.com/hashrock/self-review/internal/config"
 	"github.com/hashrock/self-review/internal/guide"
+	"github.com/hashrock/self-review/internal/install"
 	"github.com/hashrock/self-review/internal/repo"
 	"github.com/hashrock/self-review/internal/review"
 	"github.com/hashrock/self-review/skill"
@@ -34,6 +35,7 @@ Commands:
   check     check guides: format, and paths and lines against the repository
   open      open the review window
   config    show or change settings (the reader's language, the agent)
+  install-cli  put self-review on your PATH (from the macOS app)
   version   print the version
   help      show help (self-review help <command> for a command)
 
@@ -56,11 +58,12 @@ var commands = map[string]struct {
 	help string
 	run  func(args []string) error
 }{
-	"skill":   {skillHelp, runSkill},
-	"check":   {checkHelp, runCheck},
-	"commits": {commitsHelp, runCommits},
-	"open":    {openHelp, runOpen},
-	"config":  {configHelp, runConfig},
+	"skill":       {skillHelp, runSkill},
+	"check":       {checkHelp, runCheck},
+	"commits":     {commitsHelp, runCommits},
+	"open":        {openHelp, runOpen},
+	"config":      {configHelp, runConfig},
+	"install-cli": {installHelp, runInstall},
 }
 
 func main() {
@@ -718,5 +721,40 @@ func runConfig(args []string) error {
 		return err
 	}
 	show()
+	return nil
+}
+
+// ---------- install-cli ----------
+
+const installHelp = `Usage: self-review install-cli
+
+Puts the self-review command on your PATH as a symlink to the binary inside
+self-review.app, so updating the app updates the command. Run it from the
+app's binary:
+
+  /Applications/self-review.app/Contents/MacOS/self-review install-cli
+
+The link goes in the first of ~/.local/bin, ~/bin, /opt/homebrew/bin and
+/usr/local/bin that is on your login shell's PATH and writable, else in
+/usr/local/bin with an administrator's password. The window's welcome
+screen offers the same.
+`
+
+func runInstall(args []string) error {
+	if len(args) > 0 {
+		fmt.Print(installHelp)
+		if args[0] == "-h" || args[0] == "--help" {
+			return nil
+		}
+		return exitError(2)
+	}
+	res, err := install.Install()
+	if err != nil {
+		return err
+	}
+	fmt.Println("linked", res.Link)
+	if res.Shadowed != "" {
+		fmt.Printf("warning: %s comes first on your PATH, so it runs instead; remove it or reorder PATH\n", res.Shadowed)
+	}
 	return nil
 }
