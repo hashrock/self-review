@@ -42,8 +42,14 @@ func TestAskChange(t *testing.T) {
 	tt := ui.NewTester(a.View, 1440, 900)
 	tt.Frame()
 
-	click(t, tt, "💬 質問")
-	click(t, tt, "新しい質問")
+	if a.rightOpen {
+		t.Fatal("the right pane should start closed")
+	}
+	rightClick(t, tt, "以上。")
+	if err := tt.ChooseMenuItem("変更全体について質問"); err != nil {
+		t.Fatalf("menu %q: %v", tt.Menu(), err)
+	}
+	tt.Frame()
 	th := a.viewThreads()[0]
 	th.draft = "Why A?"
 	click(t, tt, "送信")
@@ -76,27 +82,25 @@ func TestAskSectionAndLines(t *testing.T) {
 	tt := ui.NewTester(a.View, 1440, 900)
 	tt.Frame()
 
-	// The guide's only ## section before the recap is "関数".
-	click(t, tt, "💬 このセクションについて質問")
+	// Right-clicking the section's heading offers to ask about it.
+	rightClick(t, tt, "関数")
+	if err := tt.ChooseMenuItem("このセクションについて質問"); err != nil {
+		t.Fatalf("menu %q: %v", tt.Menu(), err)
+	}
+	tt.Frame()
 	th := a.viewThreads()[0]
-	if th.kind != threadSection || th.section != "関数" {
-		t.Fatalf("section thread: %+v", th)
+	if th.kind != threadSection || th.section != "関数" || !a.rightOpen || !a.questionsOpen {
+		t.Fatalf("section thread: %+v (right %v)", th, a.rightOpen)
 	}
 
-	// The + by line 3 of the excerpt of a.go (the added func A).
-	var ex *block
-	for i := range a.page.blocks {
-		if a.page.blocks[i].diff != nil {
-			ex = &a.page.blocks[i]
-		}
+	// A line of an excerpt, asked about from its menu.
+	rightClick(t, tt, "func A() {}")
+	if err := tt.ChooseMenuItem("a.go:3 について質問"); err != nil {
+		t.Fatalf("menu %q: %v", tt.Menu(), err)
 	}
-	line, ok := ex.lines.view(editor.DiffNew, 3)
-	if !ok {
-		t.Fatalf("line 3 not in the excerpt: %+v", ex.lines)
-	}
-	ex.diff.OnGutterButton(editor.DiffLineRange{Side: editor.DiffNew, Start: line, End: line})
+	tt.Frame()
 	lt := a.viewThreads()[1]
-	if lt.kind != threadLine || lt.label != "a.go:3" || !a.questionsOpen {
+	if lt.kind != threadLine || lt.label != "a.go:3" {
 		t.Fatalf("line thread: %+v", lt)
 	}
 	lt.draft = "Is this exported on purpose?"
@@ -105,14 +109,14 @@ func TestAskSectionAndLines(t *testing.T) {
 		t.Fatalf("line prompt:\n%s", p)
 	}
 
-	// The line shows its thread under it.
-	a.annotate(ex.diff, ex.path, ex.lines)
-	if len(ex.diff.Annotations) != 1 || ex.diff.Annotations[0].Key != lt.id {
-		t.Fatalf("annotations: %+v", ex.diff.Annotations)
+	// The line shows its conversation under it.
+	tt.Frame()
+	if !tt.HasText("💬 a.go:3 · 1") {
+		t.Fatalf("no mark under the line: %q", tt.Texts())
 	}
 
 	// Asking about the same lines again shows the same thread.
-	ex.diff.OnGutterButton(editor.DiffLineRange{Side: editor.DiffNew, Start: line, End: line})
+	a.askLines("a.go", editor.DiffNew, 3, 3)
 	if len(a.viewThreads()) != 2 {
 		t.Fatalf("duplicate thread: %d", len(a.viewThreads()))
 	}
@@ -132,5 +136,20 @@ func TestSplitSections(t *testing.T) {
 	}
 	if strings.Join(got, ",") != "|# T,One|## One,Two|## Two" {
 		t.Fatalf("sections: %q", got)
+	}
+}
+
+// rightClick hovers over the text first, as a pointer does, then right-clicks it.
+func rightClick(t *testing.T, tt *ui.Tester, text string) {
+	t.Helper()
+	r, ok := tt.Find(text)
+	if !ok {
+		t.Fatalf("no %q in %q", text, tt.Texts())
+	}
+	tt.Move(r.X+r.W/2, r.Y+r.H/2)
+	tt.Frame()
+	tt.Frame() // hover reports the frame before
+	if err := tt.RightClick(text); err != nil {
+		t.Fatal(err)
 	}
 }

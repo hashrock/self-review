@@ -65,14 +65,18 @@ Favor continuity over exhaustive narration. Short guides get read.
 
 - Write in a friendly, plain tone for a capable programmer: precise, without
   compressed shorthand or over-explaining basics.
+- Keep the author's terms where they still fit. Explain a project-specific
+  concept briefly where it is first needed, not before.
 - Overview: state the author's problem, desired outcomes and constraints in
   their own terms, briefly. Use a short list when there are several outcomes.
-  End with one sentence on the order of the sections. Do not list files or
-  implementation details in the overview.
+  Describe user-visible behavior in concrete terms; leave implementation
+  abstractions for the sections. End with one sentence on the order of the
+  sections. Do not list files or implementation details in the overview.
 - Give each section a conceptual heading and one story.
 - Excerpts (`<excerpt>`) show the smallest changed range that reveals the
   behavior.
   - The introduction inside says what it shows and why it is the next stop.
+    When the link to what the reader saw before is not obvious, say it.
   - Add prose after an excerpt only for flow the diff does not show by itself.
   - Excerpt unchanged code only when it is needed context.
 - Code that needs no diff (supporting functions, types, tests, changes a
@@ -82,8 +86,8 @@ Favor continuity over exhaustive narration. Short guides get read.
   an invariant. Summarize similar tests in a sentence.
 - Do not narrate syntax line by line. Summarize mechanical changes.
 - Mention meaningful changes left out of the excerpts, and why, in a phrase.
-- Tell new behavior from preserved behavior. Remove claims the repository
-  does not support.
+- Tell new behavior from preserved behavior. State preconditions and
+  fallbacks where they matter. Remove claims the repository does not support.
 - Before finishing, check that every excerpt range contains the change its
   introduction describes.
 

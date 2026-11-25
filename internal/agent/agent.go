@@ -52,8 +52,9 @@ type Spec struct {
 
 // Event is something the agent did while answering.
 type Event struct {
-	Text string // a piece of the answer
-	Tool string // a tool it started, by title (reading a file, searching...)
+	Text   string // a piece of the answer
+	Tool   string // a tool it started, by title (reading a file, searching...)
+	Denied string // something it asked to do that was refused, by title
 }
 
 // Client is a running agent.
@@ -196,7 +197,33 @@ var allowedKinds = map[acp.ToolKind]bool{acp.ToolKindRead: true, acp.ToolKindSea
 // RequestPermission allows reading and searching once, and rejects the rest.
 func (c *Client) RequestPermission(ctx context.Context, p acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
 	kind, _ := p.ToolCall.Kind.Value()
-	return acp.RequestPermissionResponse{Outcome: Decide(kind, p.Options)}, nil
+	out := Decide(kind, p.Options)
+	if !allowed(out, p.Options) {
+		title, _ := p.ToolCall.Title.Value()
+		if title == "" {
+			title = string(kind)
+		}
+		c.mu.Lock()
+		on := c.handlers[p.SessionId]
+		c.mu.Unlock()
+		if on != nil {
+			on(Event{Denied: title})
+		}
+	}
+	return acp.RequestPermissionResponse{Outcome: out}, nil
+}
+
+// allowed reports whether an outcome lets the tool run.
+func allowed(out acp.RequestPermissionOutcome, options []acp.PermissionOption) bool {
+	if out.Selected == nil {
+		return false
+	}
+	for _, o := range options {
+		if o.OptionId == out.Selected.OptionId {
+			return o.Kind == acp.PermissionOptionKindAllowOnce || o.Kind == acp.PermissionOptionKindAllowAlways
+		}
+	}
+	return false
 }
 
 // Decide picks the answer to a permission request: allow once for reading

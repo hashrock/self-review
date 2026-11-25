@@ -51,16 +51,17 @@ func TestNavigateAndMarkViewed(t *testing.T) {
 	if a.view != review.ViewCommit+hs[0] || !tt.HasText("A を足す") || !tt.HasText("新しい関数。") {
 		t.Fatalf("commit 1: view %q, texts %q", a.view, tt.Texts())
 	}
-	// The excerpt is the added function, numbered as in the file.
-	if !tt.HasText("@@ -1,1 +1,3 @@") {
-		t.Errorf("hunk header missing: %q", tt.Texts())
-	}
 
 	click(t, tt, "▶")
 	if a.view != review.ViewCommit+hs[1] || !tt.HasText("why b exists") {
 		t.Fatalf("commit 2: view %q, texts %q", a.view, tt.Texts())
 	}
 
+	// The right pane starts closed; the Files button opens it.
+	if a.rightOpen {
+		t.Fatal("right pane open at start")
+	}
+	click(t, tt, "変更ファイル 0/1")
 	// Opening a file from Changes, then marking it viewed.
 	click(t, tt, "b.go")
 	if a.active != 0 || a.tabs[0].path != "b.go" {
@@ -79,7 +80,7 @@ func TestNavigateAndMarkViewed(t *testing.T) {
 	}
 
 	// Changes folds away and back.
-	click(t, tt, "▾ Changes 1/1")
+	click(t, tt, "▾ 一覧 1/1")
 	if a.changesOpen {
 		t.Fatal("changes still open")
 	}
@@ -122,7 +123,7 @@ func TestEnglishTexts(t *testing.T) {
 	a.reload()
 	tt := ui.NewTester(a.View, 1440, 900)
 	tt.Frame()
-	for _, s := range []string{"By commit 2", "Changes on this branch", "Viewed"} {
+	for _, s := range []string{"By commit 2", "Changes on this branch", "Files 0/2"} {
 		if !tt.HasText(s) {
 			t.Errorf("missing %q in %q", s, tt.Texts())
 		}

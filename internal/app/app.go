@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/egoist/mygo"
+	_ "github.com/egoist/mygo/locales/ja" // MyGo's own menus and controls in Japanese
 	"github.com/egoist/mygo/ui"
 	"github.com/egoist/mygo/ui/editor"
 	"github.com/egoist/mygo/ui/markdown"
@@ -52,7 +53,10 @@ type App struct {
 	agentTitle    string
 	threads       []*thread
 	threadSeq     int
-	questionsOpen bool // the right pane shows Questions rather than a file
+	questionsOpen bool       // the right pane shows Questions rather than a file
+	rightOpen     bool       // the right pane shows at all; closed for reading
+	menuAt        menuTarget // what the pointer is over in the guide
+	menuOpen      menuTarget // what the open menu is about
 
 	// cli is whether the command-line tool needs installing, for the
 	// welcome screen: checked in the background, as it asks the login shell.
@@ -90,6 +94,17 @@ var readingTheme = func() *ui.Theme {
 	return th
 }()
 
+// readingMarkdown sets the guide's prose larger and looser than the
+// defaults, for reading.
+var readingMarkdown = func() *markdown.Theme {
+	th := markdown.DefaultTheme(readingTheme)
+	th.FontSize = 16
+	th.LineHeight = 1.8
+	th.BlockSpacing = 1.0
+	th.CodeColors = codeTheme
+	return th
+}()
+
 // codeTheme colors the diffs: GitHub's code colors, with the selected
 // lines in gray rather than blue.
 var codeTheme = func() *editor.Theme {
@@ -97,6 +112,35 @@ var codeTheme = func() *editor.Theme {
 	ct.Modified = ui.Hex("#a1a1aa")
 	return ct
 }()
+
+// excerptPart is one group of an excerpt's lines, shown as a diff without
+// numbers or signs: the colors tell additions from deletions.
+type excerptPart struct {
+	rows []codeRow
+}
+
+// span is the file lines the part shows, new side first.
+func (p *excerptPart) span() (editor.DiffSide, int, int) {
+	start, end, side := 0, 0, editor.DiffNew
+	for _, r := range p.rows {
+		if r.new > 0 {
+			if start == 0 {
+				start = r.new
+			}
+			end = r.new
+		}
+	}
+	if start == 0 {
+		side = editor.DiffOld
+		for _, r := range p.rows {
+			if start == 0 {
+				start = r.old
+			}
+			end = r.old
+		}
+	}
+	return side, start, end
+}
 
 // kindMessage is a commit message body, shown as plain text.
 const kindMessage guide.BlockKind = "message"
@@ -109,9 +153,8 @@ type block struct {
 	start   int
 	end     int
 	status  string
-	diff    *editor.DiffState
-	lines   *lineMap // the diff's lines in the file
-	section string   // markdown: the ## section this block starts, if any
+	parts   []*excerptPart // an excerpt's groups of lines, each its own diff
+	section string         // markdown: the ## section this block starts, if any
 	err     string
 	open    bool // excerpt shown (not folded)
 }
@@ -119,7 +162,10 @@ type block struct {
 type tab struct {
 	path       string
 	start, end int
-	diff       *editor.DiffState
+	rows       []codeRow // the whole file, with its changes
+	list       ui.ListState
+	hover      int // the row under the pointer, -1 for none
+	menuRow    int // the row the open menu is about
 	err        string
 	scrollTo   int // line (from 1) to bring into view on the next frame, 0 for none
 }
@@ -129,7 +175,11 @@ func New(ws *review.Workspace, initialView, lang string) *App {
 	if initialView == "" {
 		initialView = review.ViewBranch
 	}
-	a := &App{lang: lang, tx: textFor(lang), split: 50, changesOpen: true, active: -1}
+	a := &App{lang: lang, tx: textFor(lang), split: 55, changesOpen: true, active: -1}
+	a.md.Theme = readingMarkdown
+	// One selection across the guide, whose right-click menu is ours (with
+	// Copy), rather than each block's own.
+	a.md.ShareSelection = true
 	a.setWorkspace(ws, initialView)
 	if ws == nil {
 		a.recent = config.RecentRepos()
@@ -505,8 +555,7 @@ func (a *App) buildPage(view string) (*page, error) {
 				bl.err = a.tx.NoLinesInRange
 				break
 			}
-			bl.diff, bl.lines = excerptDiff(b.Path, fd.Lines, groups)
-			a.wireDiff(bl.diff, b.Path, bl.lines)
+			bl.parts = excerptParts(b.Path, fd.Lines, groups)
 		}
 		return bl
 	}
@@ -556,70 +605,25 @@ func splitSections(src string) []block {
 	return out
 }
 
-// excerptDiff shows the chosen line groups as hunks of a patch, so the viewer
-// numbers them as in the files and highlights them in the file's language.
-func excerptDiff(path string, lines []repo.Line, groups [][]int) (*editor.DiffState, *lineMap) {
-	fp := editor.FilePatch{OldName: path, NewName: path}
-	m := &lineMap{}
+// codeFont and codeLineHeight set the code's text, a little larger than
+// the defaults, for reading.
+var codeFont = ui.Font{Family: "monospace", Size: 13.5}
+
+const codeLineHeight = 1.6
+
+// excerptParts turns each group of chosen lines into rows to draw.
+func excerptParts(path string, lines []repo.Line, groups [][]int) []*excerptPart {
+	var parts []*excerptPart
 	for _, g := range groups {
-		h := editor.PatchHunk{}
-		prevOld, prevNew := 0, 0
-		for i := g[0] - 1; i >= 0; i-- {
-			if prevOld == 0 && lines[i].Old > 0 {
-				prevOld = lines[i].Old
-			}
-			if prevNew == 0 && lines[i].New > 0 {
-				prevNew = lines[i].New
-			}
-			if prevOld > 0 && prevNew > 0 {
-				break
-			}
-		}
-		for _, idx := range g {
-			l := lines[idx]
-			if l.Old > 0 {
-				m.old = append(m.old, l.Old)
-			}
-			if l.New > 0 {
-				m.new = append(m.new, l.New)
-			}
-			switch l.Type {
-			case repo.Context:
-				h.Lines = append(h.Lines, " "+l.Text)
-				h.OldLines++
-				h.NewLines++
-			case repo.Add:
-				h.Lines = append(h.Lines, "+"+l.Text)
-				h.NewLines++
-			case repo.Del:
-				h.Lines = append(h.Lines, "-"+l.Text)
-				h.OldLines++
-			}
-			if h.OldStart == 0 && l.Old > 0 {
-				h.OldStart = l.Old
-			}
-			if h.NewStart == 0 && l.New > 0 {
-				h.NewStart = l.New
-			}
-		}
-		// A side with no lines in the hunk starts after the line before it, as git writes it.
-		if h.OldLines == 0 {
-			h.OldStart = prevOld
-		}
-		if h.NewLines == 0 {
-			h.NewStart = prevNew
-		}
-		fp.Hunks = append(fp.Hunks, h)
+		parts = append(parts, &excerptPart{rows: codeRows(path, lines, g)})
 	}
-	d := &editor.DiffState{Layout: editor.DiffUnified, FitContent: true, Indicators: editor.DiffClassic, Theme: codeTheme}
-	d.SetPatch(fp)
-	return d, m
+	return parts
 }
 
 // ---------- tabs and files ----------
 
 func (a *App) openFile(path string, start, end int) {
-	a.questionsOpen = false
+	a.questionsOpen, a.rightOpen = false, true
 	if end == 0 {
 		end = start
 	}
@@ -628,7 +632,6 @@ func (a *App) openFile(path string, start, end int) {
 			a.active = i
 			if start > 0 {
 				t.start, t.end, t.scrollTo = start, end, start
-				t.diff.SetSelectedLines(editor.DiffLineRange{Side: editor.DiffNew, Start: start - 1, End: end - 1}, true)
 			}
 			return
 		}
@@ -640,7 +643,7 @@ func (a *App) openFile(path string, start, end int) {
 }
 
 func (a *App) loadTab(t *tab) {
-	t.err, t.diff = "", nil
+	t.err, t.rows, t.hover = "", nil, -1
 	if a.page == nil {
 		return
 	}
@@ -656,16 +659,11 @@ func (a *App) loadTab(t *tab) {
 		t.err = a.tx.Binary
 		return
 	}
-	old, nw := editor.NewBuffer(fd.OldContent), editor.NewBuffer(fd.NewContent)
-	if l := editor.LanguageFor(t.path); l != nil {
-		old.SetLanguage(l)
-		nw.SetLanguage(l)
+	idx := make([]int, len(fd.Lines))
+	for i := range idx {
+		idx[i] = i
 	}
-	t.diff = &editor.DiffState{Old: old, New: nw, Layout: editor.DiffUnified, ExpandUnchanged: true, Indicators: editor.DiffClassic, Theme: codeTheme}
-	a.wireDiff(t.diff, t.path, nil)
-	if t.start > 0 {
-		t.diff.SetSelectedLines(editor.DiffLineRange{Side: editor.DiffNew, Start: t.start - 1, End: t.end - 1}, true)
-	}
+	t.rows = codeRows(t.path, fd.Lines, idx)
 }
 
 // reopenTabs reloads open tabs against the newly loaded view.
@@ -754,7 +752,7 @@ func (a *App) View(c *ui.Context) {
 		a.reload()
 	}
 	if c.Shortcut(0, ui.KeyC) {
-		a.toggleChanges()
+		a.rightOpen = !a.rightOpen
 	}
 	if c.Shortcut(0, ui.KeyBracketLeft) {
 		a.step(-1)
@@ -776,9 +774,11 @@ func (a *App) View(c *ui.Context) {
 	root.Children(func() {
 		a.topBar(c)
 		ui.Divider(c)
-		ui.SplitPercent(c, &a.split, func() { a.leftPane(c) }, func() { a.rightPane(c) }).Grow(1)
-		ui.Divider(c)
-		a.statusBar(c)
+		if a.rightOpen {
+			ui.SplitPercent(c, &a.split, func() { a.leftPane(c) }, func() { a.rightPane(c) }).Grow(1)
+		} else {
+			a.leftPane(c)
+		}
 	})
 }
 
@@ -908,6 +908,21 @@ func (a *App) topBar(c *ui.Context) {
 		if a.loading {
 			ui.Text(c, a.tx.Loading).TextColor(t.TextMuted).FontSize(12)
 		}
+		if a.page != nil {
+			if n := len(a.page.loaded.Problems); n > 0 {
+				ui.Textf(c, a.tx.Problems, n).FontSize(12).TextColor(t.Warning).Tooltip(strings.Join(a.page.loaded.Problems, "\n"))
+			}
+			done := 0
+			for _, f := range a.page.loaded.Files {
+				if f.Viewed {
+					done++
+				}
+			}
+			label := fmt.Sprintf(a.tx.FilesButton, done, len(a.page.loaded.Files))
+			if ui.Button(c.Key("files"), label).Tooltip(a.tx.TogglePanel).Clicked() {
+				a.rightOpen = !a.rightOpen
+			}
+		}
 		if ui.Button(c.Key("reload"), "↻").Tooltip(a.tx.Reload).Clicked() {
 			a.reload()
 		}
@@ -975,113 +990,111 @@ func (a *App) leftPane(c *ui.Context) {
 			a.commitBar(c)
 		}
 		ui.Scroll(c).Grow(1).Children(func() {
-			ui.Column(c).PaddingX(28).PaddingY(16).Gap(12).FillWidth().Selectable().Children(func() {
-				if a.errorMsg != "" {
-					ui.Text(c, a.errorMsg).TextColor(t.Danger)
-				}
-				if a.page == nil {
-					return
-				}
-				p := a.page
-				if p.loaded.Guide == nil {
-					ui.Column(c).Padding(12).Gap(4).Background(t.Surface).Radius(6).Children(func() {
-						ui.Text(c, a.tx.NoGuide).FontSize(13)
-						ui.Text(c, a.tx.GuideGoesAt+p.loaded.GuidePath).FontSize(12).TextColor(t.TextMuted)
-					})
-					ui.Text(c, p.title).FontSize(22).Bold()
-				}
-				var related []block
-				flush := func() {
-					if len(related) == 0 {
+			outer := ui.Column(c).FillWidth().AlignItems(ui.Center)
+			outer.Children(func() {
+				guideCol := ui.Column(c).PaddingX(48).PaddingY(36).Gap(18).FillWidth().MaxWidth(880).Selectable()
+				// The menu is about what the pointer was over at the click,
+				// frozen: the menu builds again to report the choice.
+				guideCol.ObserveInput(func(ev ui.InputEvent) {
+					if ev.Kind == ui.InputPointerDown && (ev.Button == 1 || ev.Mods&ui.Ctrl != 0) {
+						a.menuOpen = a.menuAt
+					}
+				})
+				guideCol.ContextMenu(func(m *ui.Menu) { a.guideMenu(m) })
+				guideCol.Children(func() {
+					if a.errorMsg != "" {
+						ui.Text(c, a.errorMsg).TextColor(t.Danger)
+					}
+					if a.page == nil {
 						return
 					}
-					rel := related
-					related = nil
-					ui.Column(c).Gap(2).Children(func() {
-						ui.Text(c, a.tx.Related).FontSize(12).Bold().TextColor(t.TextMuted)
-						for i, r := range rel {
-							r := r
-							loc := fmt.Sprintf("%s:%d", r.path, r.start)
-							if r.end > r.start {
-								loc += fmt.Sprintf("-%d", r.end)
-							}
-							ui.Row(c.Key(fmt.Sprintf("rel-%s-%d-%d", r.path, r.start, i))).Gap(8).Children(func() {
-								if ui.Text(c, r.label).Underline().Cursor(ui.CursorPointer).Clicked() {
-									a.openFile(r.path, r.start, r.end)
-								}
-								ui.Text(c, loc).FontSize(12).TextColor(t.TextMuted)
-							})
+					p := a.page
+					if p.loaded.Guide == nil {
+						ui.Column(c).Padding(12).Gap(4).Background(t.Surface).Radius(6).Children(func() {
+							ui.Text(c, a.tx.NoGuide).FontSize(13)
+							ui.Text(c, a.tx.GuideGoesAt+p.loaded.GuidePath).FontSize(12).TextColor(t.TextMuted)
+						})
+						ui.Text(c, p.title).FontSize(22).Bold()
+					}
+					var related []block
+					flush := func() {
+						if len(related) == 0 {
+							return
 						}
-					})
-				}
-				section := "" // the ## section being shown, to ask about at its end
-				askSection := func() {
-					if section == "" {
-						return
+						rel := related
+						related = nil
+						ui.Column(c).Gap(2).Children(func() {
+							ui.Text(c, a.tx.Related).FontSize(12).Bold().TextColor(t.TextMuted)
+							for i, r := range rel {
+								r := r
+								loc := fmt.Sprintf("%s:%d", r.path, r.start)
+								if r.end > r.start {
+									loc += fmt.Sprintf("-%d", r.end)
+								}
+								ui.Row(c.Key(fmt.Sprintf("rel-%s-%d-%d", r.path, r.start, i))).Gap(8).Children(func() {
+									if ui.Text(c, r.label).Underline().Cursor(ui.CursorPointer).Clicked() {
+										a.openFile(r.path, r.start, r.end)
+									}
+									ui.Text(c, loc).FontSize(12).TextColor(t.TextMuted)
+								})
+							}
+						})
 					}
-					title := section
-					if ui.Text(c.Key("ask-"+title), "💬 "+a.tx.AskSection).FontSize(12).TextColor(t.TextMuted).Cursor(ui.CursorPointer).Clicked() {
-						a.askSection(title)
+					a.menuAt = menuTarget{row: -1}
+					section := "" // the ## section being shown, for the menus
+					for i := range p.blocks {
+						b := &p.blocks[i]
+						if b.kind != guide.KindRelated {
+							flush()
+						}
+						if b.section != "" {
+							section = b.section
+						}
+						sec := section
+						cc := c.Key(fmt.Sprintf("block-%d", i))
+						switch b.kind {
+						case guide.KindMarkdown:
+							if markdown.View(cc, b.src, &a.md).FillWidth().Hovered() {
+								a.menuAt = menuTarget{section: sec}
+							}
+						case kindMessage:
+							ui.Text(cc, b.src).TextColor(t.TextMuted).FillWidth()
+						case guide.KindExcerpt:
+							a.excerptView(cc, b, sec)
+						case guide.KindRelated:
+							related = append(related, *b)
+						}
 					}
-				}
-				for i := range p.blocks {
-					b := &p.blocks[i]
-					if b.kind != guide.KindRelated {
-						flush()
+					flush()
+					if len(p.blocks) == 0 {
+						ui.Text(c, a.tx.NoChanges).TextColor(t.TextMuted)
 					}
-					if b.section != "" {
-						askSection()
-						section = b.section
-					}
-					cc := c.Key(fmt.Sprintf("block-%d", i))
-					switch b.kind {
-					case guide.KindMarkdown:
-						markdown.View(cc, b.src, &a.md).FillWidth()
-					case kindMessage:
-						ui.Text(cc, b.src).TextColor(t.TextMuted).FillWidth()
-					case guide.KindExcerpt:
-						a.excerptView(cc, b)
-					case guide.KindRelated:
-						related = append(related, *b)
-					}
-				}
-				flush()
-				askSection()
-				if len(p.blocks) == 0 {
-					ui.Text(c, a.tx.NoChanges).TextColor(t.TextMuted)
-				}
+					ui.Box(c.Key("end-room")).Height(240) // room after the last line, to read it at eye level
+				})
 			})
 		})
 	})
 }
 
-func (a *App) excerptView(c *ui.Context, b *block) {
+func (a *App) excerptView(c *ui.Context, b *block, section string) {
 	t := c.Theme()
-	ui.Column(c).Gap(6).FillWidth().Children(func() {
+	ui.Column(c).Gap(8).FillWidth().Children(func() {
 		if b.src != "" {
-			markdown.View(c.Key("intro"), b.src, &a.md).FillWidth()
+			if markdown.View(c.Key("intro"), b.src, &a.md).FillWidth().Hovered() {
+				a.menuAt = menuTarget{section: section}
+			}
 		}
-		ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
-			arrow := "▾"
-			if !b.open {
-				arrow = "▸"
-			}
-			if ui.Text(c, arrow).TextColor(t.TextMuted).Cursor(ui.CursorPointer).Clicked() {
-				b.open = !b.open
-			}
-			if ui.Text(c, b.path).Font("monospace").FontSize(12).TextColor(t.TextMuted).Cursor(ui.CursorPointer).Tooltip(a.tx.OpenRight).Clicked() {
+		ui.Row(c).Gap(6).AlignItems(ui.Center).MarginY(2).Children(func() {
+			if ui.Text(c, b.path).FontSize(13).TextColor(t.TextMuted).Cursor(ui.CursorPointer).Tooltip(a.tx.OpenRight).Clicked() {
 				a.openFile(b.path, b.start, b.end)
 			}
-			switch b.status {
-			case "added":
-				ui.Badge(c, a.tx.Added)
-			case "deleted":
-				ui.Badge(c, a.tx.Deleted)
-			case "unchanged":
-				ui.Badge(c, a.tx.Unchanged)
+			arrow := "⌄"
+			if !b.open {
+				arrow = "›"
 			}
-			ui.Spacer(c)
-			a.viewedBox(c, b.path)
+			if ui.Text(c, arrow).FontSize(13).TextColor(t.TextMuted).Cursor(ui.CursorPointer).Clicked() {
+				b.open = !b.open
+			}
 		})
 		if !b.open {
 			return
@@ -1090,21 +1103,109 @@ func (a *App) excerptView(c *ui.Context, b *block) {
 			ui.Text(c, b.err).TextColor(t.Danger)
 			return
 		}
-		ui.Box(c).FillWidth().Border(1, t.Border).Radius(6).Clip().Children(func() {
-			a.annotate(b.diff, b.path, b.lines)
-			editor.DiffView(c, b.diff).FillWidth()
-		})
+		marks := a.threadsOn(b.path)
+		for i, part := range b.parts {
+			if i > 0 {
+				ui.Text(c.Key(fmt.Sprintf("gap-%d", i)), "⋯").FontSize(12).TextColor(t.TextMuted).PaddingX(14).Unselectable()
+			}
+			part := part
+			box := ui.Column(c.Key(fmt.Sprintf("part-%d", i))).FillWidth().Border(1, t.Border).Radius(8).Clip().PaddingY(8)
+			box.Children(func() {
+				ui.Scroll(c).ScrollbarAxes(true, false).FillWidth().Children(func() {
+					ui.Column(c).FillWidth().Children(func() {
+						for j, r := range part.rows {
+							row := drawRow(c.Key(j), r, false, false)
+							if row.Hovered() {
+								a.menuAt = menuTarget{section: section, path: b.path, part: part, row: j}
+							}
+							for _, th := range marks[rowKey(r)] {
+								a.threadMark(c.Key(fmt.Sprintf("mark-%d", th.id)), th)
+							}
+						}
+					})
+				})
+			})
+		}
 	})
 }
 
-func (a *App) viewedBox(c *ui.Context, path string) {
+// excerptMenu is the right-click menu of an excerpt's lines: about the
+// line under the pointer, or the whole excerpt.
+func (a *App) excerptMenu(m *ui.Menu, path string, part *excerptPart, row int, section string) {
+	if row >= 0 && row < len(part.rows) {
+		side, n := part.rows[row].side()
+		if n > 0 && m.Item(fmt.Sprintf(a.tx.AskLines, lineLabel(path, n, n))).ID("ask-line").Chosen() {
+			a.askLines(path, side, n, n)
+		}
+	}
+	if side, start, end := part.span(); start > 0 && end > start {
+		if m.Item(fmt.Sprintf(a.tx.AskLines, lineLabel(path, start, end))).ID("ask-excerpt").Chosen() {
+			a.askLines(path, side, start, end)
+		}
+	}
+	a.askItems(m, section)
+	m.Separator()
+	a.viewedItem(m, path)
+	if m.Item(a.tx.OpenRight).ID("open-right").Chosen() {
+		_, start, end := part.span()
+		a.openFile(path, start, end)
+	}
+}
+
+func lineLabel(path string, start, end int) string {
+	label := fmt.Sprintf("%s:%d", path, start)
+	if end > start {
+		label += fmt.Sprintf("-%d", end)
+	}
+	return label
+}
+
+// menuTarget is what the pointer is over in the guide, which its
+// right-click menu is about: a section's prose, or an excerpt's lines.
+type menuTarget struct {
+	section string
+	path    string
+	part    *excerptPart
+	row     int
+}
+
+// guideMenu is the guide's right-click menu: one for the whole guide, as
+// its text is one selection, with items for what the pointer is over.
+func (a *App) guideMenu(m *ui.Menu) {
+	if t := a.menuOpen; t.part != nil {
+		a.excerptMenu(m, t.path, t.part, t.row, t.section)
+		return
+	}
+	a.proseMenu(m, a.menuOpen.section)
+}
+
+// proseMenu is the right-click menu of the guide's prose.
+func (a *App) proseMenu(m *ui.Menu, section string) {
+	a.askItems(m, section)
+	m.Separator()
+	m.EditItems()
+}
+
+func (a *App) askItems(m *ui.Menu, section string) {
+	if section != "" && m.Item(a.tx.AskSection).ID("ask-section").Chosen() {
+		a.askSection(section)
+	}
+	if m.Item(a.tx.AskChange).ID("ask-change").Chosen() {
+		a.askChange()
+	}
+}
+
+func (a *App) viewedItem(m *ui.Menu, path string) {
 	f := a.file(path)
 	if f == nil {
 		return
 	}
-	v := f.Viewed
-	if ui.Checkbox(c.Key("viewed-"+path), &v, a.tx.Viewed).Changed() {
-		a.setViewed(f, v)
+	label := a.tx.MarkViewed
+	if f.Viewed {
+		label = a.tx.MarkUnviewed
+	}
+	if m.Item(label).ID("viewed").Chosen() {
+		a.setViewed(f, !f.Viewed)
 	}
 }
 
@@ -1121,6 +1222,32 @@ func (a *App) enterCommitMode() {
 		}
 	}
 	a.selectView(pick.View)
+}
+
+func (a *App) viewedBox(c *ui.Context, path string) {
+	f := a.file(path)
+	if f == nil {
+		return
+	}
+	v := f.Viewed
+	if ui.Checkbox(c.Key("viewed-"+path), &v, a.tx.Viewed).Changed() {
+		a.setViewed(f, v)
+	}
+}
+
+// fileMenu is the right-click menu of a whole file's diff.
+func (a *App) fileMenu(m *ui.Menu, tb *tab) {
+	if tb.menuRow >= 0 && tb.menuRow < len(tb.rows) {
+		side, n := tb.rows[tb.menuRow].side()
+		if n > 0 && m.Item(fmt.Sprintf(a.tx.AskLines, lineLabel(tb.path, n, n))).ID("ask-line").Chosen() {
+			a.askLines(tb.path, side, n, n)
+		}
+	}
+	if m.Item(a.tx.AskChange).ID("ask-change").Chosen() {
+		a.askChange()
+	}
+	m.Separator()
+	a.viewedItem(m, tb.path)
 }
 
 // questionsTab is the pinned first tab: the conversations with the agent.
@@ -1204,7 +1331,7 @@ func (a *App) rightPane(c *ui.Context) {
 			if !a.changesOpen {
 				arrow = "▸"
 			}
-			if ui.Button(c.Key("changes"), fmt.Sprintf("%s Changes %d/%d", arrow, done, n)).Tooltip(a.tx.ToggleChanges).Clicked() {
+			if ui.Button(c.Key("changes"), fmt.Sprintf("%s "+a.tx.ChangesTab, arrow, done, n)).Tooltip(a.tx.ToggleChanges).Clicked() {
 				a.toggleChanges()
 			}
 			a.questionsTab(c)
@@ -1212,7 +1339,7 @@ func (a *App) rightPane(c *ui.Context) {
 		})
 		ui.Divider(c)
 		ui.Row(c).Grow(1).FillWidth().Children(func() {
-			if a.changesOpen {
+			if a.changesOpen && !a.questionsOpen { // questions need the room
 				a.changesList(c)
 			}
 			if a.questionsOpen {
@@ -1295,29 +1422,38 @@ func (a *App) fileView(c *ui.Context) {
 			ui.Text(c, tb.err).TextColor(t.TextMuted).Padding(24)
 			return
 		}
-		if tb.diff == nil {
-			return
-		}
-		a.annotate(tb.diff, tb.path, nil)
-		editor.DiffView(c.Key("file-"+tb.path), tb.diff).Grow(1).FillWidth()
-		if tb.scrollTo > 0 && tb.diff.ViewportHeight() > 0 {
-			y := tb.diff.LineTop(editor.DiffNew, tb.scrollTo-1) - tb.diff.ViewportHeight()/3
-			tb.diff.SetScrollY(max(0, y))
-			tb.scrollTo = 0
-		}
-	})
-}
-
-func (a *App) statusBar(c *ui.Context) {
-	t := c.Theme()
-	ui.Row(c).PaddingX(12).PaddingY(4).Gap(16).AlignItems(ui.Center).Children(func() {
-		ui.Text(c, a.ws.Repo.Name()+" / "+a.ws.Repo.Branch()).FontSize(12).TextColor(t.TextMuted)
-		if a.page != nil {
-			ui.Textf(c, "+%d", a.page.added).FontSize(12).TextColor(t.Success)
-			ui.Textf(c, "−%d", a.page.del).FontSize(12).TextColor(t.Danger)
-			if n := len(a.page.loaded.Problems); n > 0 {
-				ui.Textf(c, a.tx.Problems, n).FontSize(12).TextColor(t.Warning).Tooltip(strings.Join(a.page.loaded.Problems, "\n"))
+		marks := a.threadsOn(tb.path)
+		tb.hover = -1
+		list := ui.List(c.Key("file-"+tb.path), &tb.list, len(tb.rows), func(i int) {
+			r := tb.rows[i]
+			n := r.new
+			if r.typ == repo.Del {
+				n = r.old
 			}
+			ui.Column(c).FillWidth().Children(func() {
+				focused := tb.start > 0 && r.typ != repo.Del && n >= tb.start && n <= tb.end
+				if drawRow(c, r, true, focused).Hovered() {
+					tb.hover = i
+				}
+				for _, th := range marks[rowKey(r)] {
+					a.threadMark(c.Key(fmt.Sprintf("mark-%d", th.id)), th)
+				}
+			})
+		}).Grow(1).FillWidth().Padding(6, 0, 160, 0)
+		list.ObserveInput(func(ev ui.InputEvent) {
+			if ev.Kind == ui.InputPointerDown && (ev.Button == 1 || ev.Mods&ui.Ctrl != 0) {
+				tb.menuRow = tb.hover
+			}
+		})
+		list.ContextMenu(func(m *ui.Menu) { a.fileMenu(m, tb) })
+		if tb.scrollTo > 0 {
+			for i, r := range tb.rows {
+				if r.new == tb.scrollTo {
+					tb.list.ScrollTo(i, ui.Center)
+					break
+				}
+			}
+			tb.scrollTo = 0
 		}
 	})
 }

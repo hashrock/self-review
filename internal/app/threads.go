@@ -90,10 +90,11 @@ type thread struct {
 }
 
 type message struct {
-	user  bool
-	text  string
-	tools []string
-	err   string
+	user   bool
+	text   string
+	tools  []string
+	denied []string // what the agent asked to do and was refused
+	err    string
 }
 
 // setAgent chooses the agent questions go to.
@@ -141,7 +142,7 @@ func (a *App) newThread(th thread) *thread {
 }
 
 func (a *App) focusThread(th *thread) {
-	a.questionsOpen = true
+	a.questionsOpen, a.rightOpen = true, true
 	th.focus = true
 }
 
@@ -221,6 +222,9 @@ func (a *App) send(th *thread) {
 					last.text += e.Text
 					if e.Tool != "" {
 						last.tools = append(last.tools, e.Tool)
+					}
+					if e.Denied != "" {
+						last.denied = append(last.denied, e.Denied)
 					}
 				})
 			})
@@ -322,7 +326,7 @@ func (a *App) questionsPanel(c *ui.Context) {
 		ui.Divider(c)
 		threads := a.viewThreads()
 		ui.Scroll(c).Grow(1).Children(func() {
-			ui.Column(c).Padding(12).Gap(14).FillWidth().Children(func() {
+			ui.Column(c).Padding(12, 12, 160, 12).Gap(14).FillWidth().Children(func() {
 				if len(threads) == 0 {
 					ui.Text(c, a.tx.NoQuestions).FontSize(13).TextColor(t.TextMuted)
 				}
@@ -374,6 +378,12 @@ func (a *App) threadCard(c *ui.Context, th *thread) {
 						markdown.View(cc, m.text, &a.md).FillWidth()
 					}
 				}
+				if len(m.denied) > 0 {
+					ui.Text(cc.Key("denied"), fmt.Sprintf(a.tx.Denied, strings.Join(m.denied, ", "))).FontSize(12).TextColor(t.TextMuted).FillWidth()
+				}
+				if !streaming && m.text == "" && m.err == "" {
+					ui.Text(cc.Key("empty"), a.tx.NoAnswer).FontSize(12).TextColor(t.TextMuted).FillWidth()
+				}
 				if m.err != "" {
 					ui.Text(cc.Key("err"), m.err).FontSize(12).TextColor(t.Danger).FillWidth()
 				}
@@ -403,102 +413,4 @@ func (a *App) threadCard(c *ui.Context, th *thread) {
 			a.send(th)
 		}
 	})
-}
-
-// ---------- asking from diffs ----------
-
-// lineMap turns a diff view's lines, from 0, into file lines, from 1.
-type lineMap struct{ old, new []int }
-
-func (m *lineMap) file(side editor.DiffSide, line int) int {
-	if m == nil {
-		return line + 1 // a whole file: its own numbering
-	}
-	s := m.new
-	if side == editor.DiffOld {
-		s = m.old
-	}
-	if line >= 0 && line < len(s) {
-		return s[line]
-	}
-	return 0
-}
-
-func (m *lineMap) view(side editor.DiffSide, fileLine int) (int, bool) {
-	if m == nil {
-		return fileLine - 1, fileLine > 0
-	}
-	s := m.new
-	if side == editor.DiffOld {
-		s = m.old
-	}
-	for i, n := range s {
-		if n == fileLine {
-			return i, true
-		}
-	}
-	return 0, false
-}
-
-// wireDiff lets the lines of a diff of path be asked about (the + by a line
-// number, or a selection of lines), and marks the lines that have threads.
-func (a *App) wireDiff(d *editor.DiffState, path string, m *lineMap) {
-	d.LineSelection = true
-	d.OnGutterButton = func(r editor.DiffLineRange) {
-		if sel, ok := d.SelectedLines(); ok && sel.Side == r.Side && sel.Start <= r.Start && r.Start <= sel.End {
-			r = sel
-		}
-		start, end := m.file(r.Side, r.Start), m.file(r.Side, r.End)
-		if start == 0 {
-			return
-		}
-		if end < start {
-			end = start
-		}
-		a.askLines(path, r.Side, start, end)
-	}
-	d.RenderAnnotation = func(c *ui.Context, an editor.DiffAnnotation) {
-		t := c.Theme()
-		th := a.threadByID(an.Key)
-		if th == nil {
-			return
-		}
-		row := ui.Row(c).Gap(6).AlignItems(ui.Center).PaddingX(12).Height(an.Height).Cursor(ui.CursorPointer).Background(t.Surface).FillWidth()
-		if row.Clicked() {
-			a.focusThread(th)
-		}
-		row.Children(func() {
-			n := 0
-			for _, msg := range th.msgs {
-				if msg.user {
-					n++
-				}
-			}
-			ui.Textf(c, "💬 %s · %d", th.label, n).FontSize(12).TextColor(t.TextMuted)
-		})
-	}
-}
-
-// annotate marks the threads on lines of path in d.
-func (a *App) annotate(d *editor.DiffState, path string, m *lineMap) {
-	var anns []editor.DiffAnnotation
-	for _, th := range a.viewThreads() {
-		if th.kind != threadLine || th.path != path {
-			continue
-		}
-		if line, ok := m.view(th.side, th.end); ok {
-			anns = append(anns, editor.DiffAnnotation{Side: th.side, Line: line, Height: 28, Key: th.id})
-		}
-	}
-	d.Annotations = anns
-}
-
-func (a *App) threadByID(key any) *thread {
-	id, _ := key.(int)
-	for _, th := range a.threads {
-		if th.id == id {
-			return th
-		}
-	}
-	return nil
 }

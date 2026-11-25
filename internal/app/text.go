@@ -31,8 +31,12 @@ type text struct {
 	Questions, NewQuestion, AskSection, AskPlaceholder      string // questions to the agent
 	Send, Stop, Delete, ReadOnly, WholeChange               string
 	SectionLabel, Thinking, NoQuestions                     string // SectionLabel and Thinking take a name
+	Denied, NoAnswer                                        string // Denied takes what was refused
 	InstallCLI, CLIHint, CLIInstalled, CLIShadowed          string // CLIInstalled takes the link; CLIShadowed the link and the other command
 	MoveTitle, MoveDetail, MoveButton, NotNow, DontAskAgain string // moving the app into Applications
+	AskLines, AskChange, MarkViewed, MarkUnviewed           string // right-click menus; AskLines takes a location
+	FilesButton, TogglePanel                                string // FilesButton takes viewed and total files
+	ChangesTab                                              string // the Changes list toggle; takes viewed and total files
 }
 
 var texts = map[string]*text{
@@ -76,7 +80,16 @@ var texts = map[string]*text{
 		WholeChange:    "The whole change",
 		SectionLabel:   "Section: %s",
 		Thinking:       "%s is thinking…",
+		Denied:         "Refused, as the agent is read-only: %s",
+		NoAnswer:       "The agent ended its turn without an answer.",
 		InstallCLI:     "Install Command-Line Tool",
+		AskLines:       "Ask about %s",
+		AskChange:      "Ask about the whole change",
+		MarkViewed:     "Mark as Viewed",
+		MarkUnviewed:   "Mark as Unviewed",
+		FilesButton:    "Files %d/%d",
+		ChangesTab:     "Changes %d/%d",
+		TogglePanel:    "Show or hide files and questions (C)",
 		MoveTitle:      "Move self-review to the Applications folder?",
 		MoveDetail:     "It runs from outside Applications now. Moved, it stays where macOS expects apps, and the command-line tool can link to it.",
 		MoveButton:     "Move to Applications",
@@ -127,7 +140,16 @@ var texts = map[string]*text{
 		WholeChange:    "変更全体",
 		SectionLabel:   "セクション: %s",
 		Thinking:       "%s が考えています…",
+		Denied:         "読み取り専用のため断りました: %s",
+		NoAnswer:       "エージェントは回答せずに終了しました。",
 		InstallCLI:     "コマンドラインツールをインストール",
+		AskLines:       "%s について質問",
+		AskChange:      "変更全体について質問",
+		MarkViewed:     "既読にする",
+		MarkUnviewed:   "未読に戻す",
+		FilesButton:    "変更ファイル %d/%d",
+		ChangesTab:     "一覧 %d/%d",
+		TogglePanel:    "ファイルと質問を表示・非表示 (C)",
 		MoveTitle:      "self-review をアプリケーションフォルダに移動しますか？",
 		MoveDetail:     "いまはアプリケーションフォルダの外で動いています。移動しておくと、コマンドラインツールのリンク先も変わらずに済みます。",
 		MoveButton:     "アプリケーションフォルダに移動",

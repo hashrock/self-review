@@ -9,7 +9,7 @@
 A plain diff shows a change file by file. A good explanation shows it in the order that makes sense: the intent first, then the entry point, then the pieces it calls, with only the lines that matter. self-review asks your coding agent (Claude Code, for example) to write that explanation as a short guide, and shows it in a native window next to the real diffs from your Git repository.
 
 - **Local only.** No server, no port, no telemetry. The window is drawn natively from Go with [MyGo](https://mygo.run/); there is no web page or browser involved. Diffs come from your local Git.
-- **Ask your agent.** Ask about the whole change, a section of the guide, or any lines (the **+** next to a line number), and read the answers next to the diff. Questions go to the coding agent you already use (Claude Code, Gemini CLI or Codex), read-only.
+- **Ask your agent.** Right-click a line, an excerpt or a section to ask about it, and read the answers next to the diff. Questions go to the coding agent you already use (Claude Code, Gemini CLI or Codex), read-only.
 - **Nothing to clean up.** Closing the window ends the process.
 - **Whole branch or one commit at a time.** Review a pull request as a whole, or step through its commits.
 - **Viewed marks.** Tick files as you read them; editing a file makes it unread again.
@@ -68,13 +68,15 @@ The window is available in English and Japanese. Text meant for agents (the skil
 
 ## Asking questions
 
-The **💬 Questions** tab on the right holds conversations with your coding agent:
+The guide reads on its own; files and questions open on the right only when you ask for them (**Files** at the top, or `C`).
 
-- **New question** asks about the whole change.
-- **Ask about this section**, at the end of each section of the guide, asks about that section.
-- The **+** next to a line number (in the guide or in a file) asks about that line, or about the lines you selected. The line then shows its conversation under it.
+Right-click to ask your coding agent:
 
-Type a question or a review comment and press ⌘↩. The first message of a conversation tells the agent what changed and what you are looking at; follow-ups continue the same conversation.
+- a line of an excerpt or a file: **Ask about src/physics.js:24**, or the whole excerpt
+- a section's prose: **Ask about this section**
+- anywhere: **Ask about the whole change**
+
+The conversation opens in the **💬 Questions** tab on the right, and a line shows its conversation under it. Type a question or a review comment and press ⌘↩. The first message of a conversation tells the agent what changed and what you are looking at; follow-ups continue the same conversation.
 
 self-review talks to the agent through the [Agent Client Protocol](https://agentclientprotocol.com/), with the agent's own login:
 
@@ -139,7 +141,7 @@ self-review config           show or change settings (language, agent)
 self-review help <command>   details of a command
 ```
 
-Keys in the window: `R` reload, `C` show or hide Changes, `V` mark the open file viewed, `[` and `]` previous and next commit.
+Keys in the window: `R` reload, `C` show or hide files and questions, `V` mark the open file viewed, `[` and `]` previous and next commit. Right-click a file's lines to mark it viewed, too.
 
 ## Development
 
