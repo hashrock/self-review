@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#e9eef4"/>
+    </linearGradient>
+    <linearGradient id="badge" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3b8bf5"/>
+      <stop offset="1" stop-color="#1663d6"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="14" stdDeviation="18" flood-color="#0b1b33" flood-opacity="0.22"/>
+    </filter>
+    <filter id="soft" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#0b1b33" flood-opacity="0.18"/>
+    </filter>
+    <clipPath id="page"><rect x="232" y="196" width="560" height="632" rx="36"/></clipPath>
+  </defs>
+
+  <!-- macOS icon body: 824px rounded square centered on the 1024 canvas -->
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)" filter="url(#shadow)"/>
+  <rect x="100.5" y="100.5" width="823" height="823" rx="184.5" fill="none" stroke="#c9d3df" stroke-width="1"/>
+
+  <!-- the guide page -->
+  <g filter="url(#soft)">
+    <rect x="232" y="196" width="560" height="632" rx="36" fill="#ffffff"/>
+  </g>
+  <g clip-path="url(#page)">
+    <!-- heading and prose -->
+    <rect x="292" y="262" width="300" height="34" rx="17" fill="#1f2328"/>
+    <rect x="292" y="326" width="440" height="20" rx="10" fill="#c3cad3"/>
+    <rect x="292" y="364" width="380" height="20" rx="10" fill="#c3cad3"/>
+
+    <!-- the diff excerpt -->
+    <rect x="272" y="420" width="480" height="300" rx="22" fill="#f6f8fa" stroke="#d8dee4" stroke-width="3"/>
+    <rect x="292" y="452" width="250" height="18" rx="9" fill="#aab3bd"/>
+    <!-- deleted line -->
+    <rect x="274" y="494" width="476" height="56" fill="#ffd7d5"/>
+    <path d="M298 522 H320" stroke="#cf222e" stroke-width="9" stroke-linecap="round"/>
+    <rect x="344" y="512" width="300" height="20" rx="10" fill="#e8838a"/>
+    <!-- added lines -->
+    <rect x="274" y="550" width="476" height="112" fill="#ccf2d6"/>
+    <path d="M298 578 H320 M309 567 V589" stroke="#1a7f37" stroke-width="9" stroke-linecap="round"/>
+    <rect x="344" y="568" width="340" height="20" rx="10" fill="#5fbf7b"/>
+    <path d="M298 634 H320 M309 623 V645" stroke="#1a7f37" stroke-width="9" stroke-linecap="round"/>
+    <rect x="344" y="624" width="250" height="20" rx="10" fill="#5fbf7b"/>
+    <rect x="292" y="682" width="210" height="18" rx="9" fill="#aab3bd"/>
+
+    <rect x="292" y="752" width="400" height="20" rx="10" fill="#c3cad3"/>
+  </g>
+
+  <!-- reviewed badge -->
+  <g filter="url(#soft)">
+    <circle cx="742" cy="752" r="118" fill="url(#badge)"/>
+  </g>
+  <circle cx="742" cy="752" r="118" fill="none" stroke="#ffffff" stroke-width="14"/>
+  <path d="M686 754 L726 794 L800 714" fill="none" stroke="#ffffff" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
