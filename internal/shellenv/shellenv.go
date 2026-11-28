@@ -4,6 +4,8 @@ package shellenv
 
 import (
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 )
@@ -45,4 +47,19 @@ func Environ(env []string) []string {
 		}
 	}
 	return append(out, "PATH="+Path())
+}
+
+// LookPath finds a command in the login shell's PATH, as a terminal would.
+// exec.Command searches the process's own PATH, which is minimal for an app
+// opened from Finder.
+func LookPath(name string) (string, error) {
+	if strings.ContainsRune(name, os.PathSeparator) {
+		return exec.LookPath(name)
+	}
+	for _, d := range Dirs() {
+		if p, err := exec.LookPath(filepath.Join(d, name)); err == nil {
+			return p, nil
+		}
+	}
+	return "", &exec.Error{Name: name, Err: exec.ErrNotFound}
 }

@@ -76,7 +76,13 @@ func Start(ctx context.Context, spec Spec, cwd string) (*Client, error) {
 	if len(spec.Command) == 0 {
 		return nil, errors.New("no agent command")
 	}
-	cmd := exec.Command(spec.Command[0], spec.Command[1:]...)
+	// Look the command up in the login shell's PATH, not the process's:
+	// opened from Finder, the app's own PATH has no npx.
+	name := spec.Command[0]
+	if p, err := shellenv.LookPath(name); err == nil {
+		name = p
+	}
+	cmd := exec.Command(name, spec.Command[1:]...)
 	cmd.Dir = cwd
 	cmd.Env = append(shellenv.Environ(os.Environ()), spec.Env...)
 	cmd.SysProcAttr = ownGroup()
